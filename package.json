@@ -1,0 +1,27 @@
+{
+  "name": "cesium-ber-dou-grid-3dtiles",
+  "private": true,
+  "version": "1.0.0",
+  "description": "低空经济北斗网格化三维空间管理与3D Tiles建筑避障可视化平台 (React + TypeScript + Cesium)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "tsx --test src/__tests__/beidouGrid.test.ts"
+  },
+  "dependencies": {
+    "cesium": "^1.137.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite-plugin-cesium": "^1.2.23"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}

@@ -1,0 +1,21 @@
+# Dependencies & Build Artifacts
+node_modules
+dist
+dist-ssr
+*.local
+
+# Local Environment Variables & Private Tokens
+.env
+.env.*
+!.env.example
+
+# Optional Local GIS / 3D Tiles Data Directory
+data/
+
+# Editor & OS Files
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+*.log
+*.tsbuildinfo
