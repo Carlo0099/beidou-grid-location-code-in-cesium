@@ -7,13 +7,14 @@
 ## 核心特性
 
 ### 1.1 全球与局部北斗网格可视化
-- **全球尺度立体球壳网格**：支持在全球视角下以多层同心球壳线框与径向立柱展示北斗 1–10 级空间网格与位置码标注（基于 `Cesium.PolylineCollection` 跨子午线稳定合批渲染）。
-- **多分辨率自适应（Adaptive LOD）与手动切换**：支持相机高度自动推荐级别或手动指定 1–10 级网格，支持 **2D 平面（`2d-plane`）、3D 立体线框（`3d-wireframe`）、半透明体积（`translucent-volume`）、混合融合（`hybrid`）** 四种渲染形态。
+- **Cesium 原生底图与图层选择器**：直接采用 Cesium 自带的 `BaseLayerPicker`（默认免 Token 加载内置 ArcGIS World Imagery / OpenStreetMap；配置 Ion Token 后可启用 Bing Maps Aerial 等 Cesium 内置底图）。
+- **全球尺度立体球壳网格与全格编码标注**：在 L1 全球宏观视野下以多层同心球壳线框与径向立柱展示全球北斗网格（基于 `Cesium.PolylineCollection` 跨子午线稳定合批渲染），且每一个全球网格单元均附带对应北斗位置编码标注。
+- **相机高度自适应分辨率（Adaptive LOD，L1–L10 全覆盖）**：随相机缩放高度变化自动实时切换并重绘 1–10 级北斗网格分辨率与位置编码（支持 L1 球壳网格与 L2–L10 相机视区三维细分网格无缝衔接），并支持 **2D 平面（`2d-plane`）、3D 立体线框（`3d-wireframe`）、半透明体积（`translucent-volume`）、混合融合（`hybrid`）** 四种渲染形态。
 - **实时光标探针与拓扑跳转**：鼠标实时换算 WGS84 经纬高及北斗 2D/3D 位置码；点击任意体元可查看空间包络边界、关联建筑及 8 邻域 + 上下邻接网格跳转。
 
-### 1.2 空域网格化建模与 3D Tiles 建筑避障
+### 1.2 空域网格化建模与建筑避障（与 1.1 独立模块）
 - **低空高度域分层建模**：支持按国标高度步长（L6 `61.84m` / L7 `7.73m`）或低空精细航层步长（`15m` / `30m`）构建三维立体网格。
-- **3D Tiles 建筑轮廓自动提取与网格化**：内置纯 TypeScript 解析器 [TilesetBuildingExtractor.ts](src/core/TilesetBuildingExtractor.ts)，支持直接解析 3D Tiles 1.1 `.glb` / `.b3dm` 内 `_FEATURE_ID_0` 顶点并构建二维凸包轮廓与起止高程；未挂载外部 3D Tiles 时自动降级到内置示范低空 CBD 建筑群，开箱即用。
+- **多源建筑加载与轮廓提取**：支持在当前相机视区一键生成三维测试建筑群、加载 Cesium 内置 OSM Buildings（需 Ion Token），或输入自定义 3D Tileset URL 通过纯 TypeScript 解析器 [TilesetBuildingExtractor.ts](src/core/TilesetBuildingExtractor.ts) 实时提取建筑 `.glb`/`.b3dm` 轮廓与高程。
 - **周边避障缓冲区与飞行冲突分析**：自动将建筑物体素化为红色半透明白边禁飞体元，并按设定水平/垂直安全距离生成橙色避障缓冲区；支持预置航线及地图交互选点规划，实时检测冲突体元并基于三维北斗体元 A* 算法自动求解绿色无冲突绕飞航线与 UAV 实时轨迹追踪。
 
 ### 1.3 动态经纬度、路径网格生成与可调用 API
@@ -58,11 +59,11 @@ npm install
 npm run dev
 ```
 
-浏览器打开 `http://localhost:5173` 即可使用（未配置任何外部 Token 或本地离线数据时，系统自动使用免 Token 公开底图与内置示范低空街区运行）。
+浏览器打开 `http://localhost:5173` 即可使用（底图与三维视图完全使用 Cesium 自带图层控件）。
 
-### 2. 可选：配置个人底图 Token 与本地离线 3D Tiles
+### 2. 可选：配置 Cesium Ion Token（用于 Bing 底图与 Cesium OSM Buildings）
 
-如需使用个人天地图底图或加载本地离线 3D Tiles / 地形 / 影像瓦片，请复制配置模板：
+如需要使用 Cesium Ion 底图或加载 Cesium OSM Buildings 三维建筑白模，请复制配置模板：
 
 ```bash
 cp .env.example .env.local
@@ -71,12 +72,7 @@ cp .env.example .env.local
 在 `.env.local`（已被 `.gitignore` 忽略，不会进入版本库）中按需填写：
 
 ```env
-VITE_TIANDITU_TOKEN=你的天地图Token
 VITE_CESIUM_ION_TOKEN=你的CesiumIonToken
-LOCAL_3DTILES_DIR=/path/to/your/3dtiles
-LOCAL_3DTILES_GZIP_DIR=/path/to/your/3dtiles_gzip
-LOCAL_TILES_DIR=/path/to/your/imagery_tiles
-LOCAL_TERRAIN_DIR=/path/to/your/terrain
 ```
 
 ### 3. 生产构建与测试

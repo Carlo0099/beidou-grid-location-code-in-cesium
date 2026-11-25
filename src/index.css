@@ -547,10 +547,17 @@ input[type="range"] {
   background: rgba(56, 189, 248, 0.28);
 }
 
+/* Cesium built-in toolbar below top HUD */
+.cesium-viewer-toolbar {
+  top: 74px !important;
+  right: 12px !important;
+  z-index: 22 !important;
+}
+
 /* Right Floating Inspector Card */
 .inspector-card {
   position: absolute;
-  top: 76px;
+  top: 120px;
   right: 12px;
   width: 320px;
   z-index: 20;

@@ -1,11 +1,10 @@
 import React, { useState } from "react";
 import type {
   BeidouVoxelCell,
-  CityPreset,
+  CameraViewInfo,
   FlightPathAnalysisResult,
   GridLayerStyle,
   GridLevel,
-  LocalAssetsAvailability,
   PathGridGenerationResponse,
   Wgs84Point,
 } from "../types/beidou";
@@ -14,7 +13,10 @@ import {
   GRID_LEVEL_SPECS,
   HEIGHT_STEPS,
 } from "../core/BeidouGridCode";
-import { CITY_PRESETS, FLIGHT_PRESETS } from "../core/SampleCityData";
+import {
+  DEFAULT_AIRSPACE_CENTER,
+  FLIGHT_PRESETS,
+} from "../core/SampleCityData";
 import {
   BuildingIcon,
   GlobeIcon,
@@ -31,10 +33,9 @@ interface ControlPanelProps {
   onChangeTab: (tab: WorkbenchTab) => void;
   collapsed: boolean;
 
-  // 1.1 Global & Local
-  activePresetId: string;
-  onSelectPreset: (preset: CityPreset) => void;
-  localAssets: LocalAssetsAvailability | null;
+  // 1.1 Global & Adaptive 1-10 Grid
+  cameraView: CameraViewInfo;
+  onFlyToGlobal: () => void;
   gridLevel: GridLevel;
   onChangeGridLevel: (lv: GridLevel) => void;
   adaptiveLevelEnabled: boolean;
@@ -50,6 +51,11 @@ interface ControlPanelProps {
   onQueryPointOrCode: (point?: Wgs84Point, code?: string) => void;
 
   // 1.2 Airspace & Buildings
+  hasIonToken: boolean;
+  customTilesetUrl: string;
+  onChangeCustomTilesetUrl: (url: string) => void;
+  onLoadOsmBuildings: () => void;
+  onLoadCustomTileset: () => void;
   buildingGridEnabled: boolean;
   onToggleBuildingGrid: (v: boolean) => void;
   bufferGridEnabled: boolean;
@@ -112,18 +118,18 @@ const LAYER_STYLES: Array<{ value: GridLayerStyle; label: string }> = [
 ];
 
 export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
-  const [lonInput, setLonInput] = useState("114.057868");
-  const [latInput, setLatInput] = useState("22.543099");
+  const [lonInput, setLonInput] = useState(String(DEFAULT_AIRSPACE_CENTER.lon));
+  const [latInput, setLatInput] = useState(String(DEFAULT_AIRSPACE_CENTER.lat));
   const [altInput, setAltInput] = useState("120");
-  const [codeInput, setCodeInput] = useState("N050F000500032078031000");
+  const [codeInput, setCodeInput] = useState("N050J0047050390B8020001800000000");
 
   const [trajectoryJson, setTrajectoryJson] = useState(() =>
     JSON.stringify(
       [
-        { lon: 114.0532, lat: 22.5402, height: 110 },
-        { lon: 114.0568, lat: 22.5425, height: 145 },
-        { lon: 114.0604, lat: 22.5448, height: 175 },
-        { lon: 114.0632, lat: 22.5466, height: 150 },
+        { lon: 116.308, lat: 39.9902, height: 110 },
+        { lon: 116.3112, lat: 39.9922, height: 145 },
+        { lon: 116.3144, lat: 39.9941, height: 175 },
+        { lon: 116.3172, lat: 39.9959, height: 150 },
       ],
       null,
       2,
@@ -220,30 +226,36 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
           <>
             <div className="panel-card">
               <div className="card-title-row">
-                <div className="card-title">场景尺度与 3D Tiles 城市切换</div>
+                <div className="card-title">
+                  <GlobeIcon size={14} />
+                  全球宏观视野控制
+                </div>
+                <span className="hud-badge">
+                  {props.cameraView.cameraHeightMeters >= 10000
+                    ? `${(props.cameraView.cameraHeightMeters / 1000).toFixed(1)} km`
+                    : props.cameraView.cameraHeightMeters >= 10
+                      ? `${Math.round(props.cameraView.cameraHeightMeters)} m`
+                      : `${props.cameraView.cameraHeightMeters.toFixed(2)} m`}
+                </span>
               </div>
-              <div className="chip-grid">
-                {CITY_PRESETS.map((preset) => {
-                  const key = preset.tilesetKey;
-                  const hasLocal =
-                    !key ||
-                    key === "sample-cbd" ||
-                    Boolean(props.localAssets?.tilesets?.[key]);
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      className={`chip-btn ${props.activePresetId === preset.id ? "active" : ""}`}
-                      onClick={() => props.onSelectPreset(preset)}
-                    >
-                      <strong>{preset.name}</strong>
-                      <small>
-                        {preset.subtitle}
-                        {!hasLocal ? " (内置兜底)" : ""}
-                      </small>
-                    </button>
-                  );
-                })}
+              <p className="card-subtitle">
+                滚轮缩放相机高度时，系统可自适应切换 L1-L10 北斗网格编码与三维分辨率；L1
+                全球尺度下每个网格单元均附带位置编码。
+              </p>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ flex: 1 }}
+                  onClick={props.onFlyToGlobal}
+                >
+                  <GlobeIcon size={13} /> 飞回全球宏观视野 (L1)
+                </button>
+              </div>
+              <div className="card-subtitle">
+                视区中心：{props.cameraView.centerLon.toFixed(4)}°,{" "}
+                {props.cameraView.centerLat.toFixed(4)}° · 推荐级别 L
+                {props.cameraView.adaptiveLevel}
               </div>
             </div>
 
@@ -254,7 +266,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
               </div>
 
               <label className="toggle-row">
-                <span>相机高度自适应分辨率 (Adaptive LOD)</span>
+                <span>相机高度自适应分辨率 (Adaptive LOD 1-10级)</span>
                 <input
                   type="checkbox"
                   checked={props.adaptiveLevelEnabled}
@@ -271,7 +283,9 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
                     L{props.gridLevel} · {levelSpec.angularLabel} (~
                     {levelSpec.approxGroundMeters >= 1000
                       ? `${(levelSpec.approxGroundMeters / 1000).toFixed(1)}km`
-                      : `${levelSpec.approxGroundMeters}m`}
+                      : levelSpec.approxGroundMeters >= 1
+                        ? `${levelSpec.approxGroundMeters}m`
+                        : `${(levelSpec.approxGroundMeters * 100).toFixed(1)}cm`}
                     )
                   </strong>
                 </div>
@@ -281,9 +295,12 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
                   max={10}
                   step={1}
                   value={props.gridLevel}
-                  onChange={(e) =>
-                    props.onChangeGridLevel(Number(e.target.value) as GridLevel)
-                  }
+                  onChange={(e) => {
+                    if (props.adaptiveLevelEnabled) {
+                      props.onToggleAdaptiveLevel(false);
+                    }
+                    props.onChangeGridLevel(Number(e.target.value) as GridLevel);
+                  }}
                 />
                 <div className="card-subtitle">
                   高度步长：{HEIGHT_STEPS[props.gridLevel - 1]} m · 适用尺度：
@@ -310,7 +327,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
               </div>
 
               <label className="toggle-row">
-                <span>全球立体多层球壳网格 (全球尺度)</span>
+                <span>全球立体多层球壳网格 (L1 全球尺度)</span>
                 <input
                   type="checkbox"
                   checked={props.showGlobalShell}
@@ -319,7 +336,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
               </label>
 
               <label className="toggle-row">
-                <span>局部/城市区域立体空域网格</span>
+                <span>视口自适应网格 (L2-L10 满视口渲染)</span>
                 <input
                   type="checkbox"
                   checked={props.showLocalGrid}
@@ -397,7 +414,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
               <div className="card-title-row">
                 <div className="card-title">
                   <BuildingIcon size={14} />
-                  建筑轮廓自动提取与三维网格化
+                  建筑轮廓提取与空域三维网格化
                 </div>
                 <button
                   type="button"
@@ -406,8 +423,45 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
                   onClick={props.onReextractBuildings}
                   disabled={props.isExtractingBuildings}
                 >
-                  {props.isExtractingBuildings ? "提取中..." : "提取当前视区"}
+                  {props.isExtractingBuildings ? "构建中..." : "在当前视区生成"}
                 </button>
+              </div>
+
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ flex: 1, fontSize: 11 }}
+                  onClick={props.onLoadOsmBuildings}
+                  disabled={!props.hasIonToken}
+                  title={
+                    props.hasIonToken
+                      ? "加载 Cesium OSM Buildings 全球三维建筑"
+                      : "需在 .env 中配置 VITE_CESIUM_ION_TOKEN 后启用"
+                  }
+                >
+                  {props.hasIonToken ? "加载 Cesium OSM 建筑" : "OSM Buildings (需 Ion Token)"}
+                </button>
+              </div>
+
+              <div className="field-box">
+                <label>自定义 3D Tileset URL (可选)</label>
+                <div className="btn-row">
+                  <input
+                    value={props.customTilesetUrl}
+                    placeholder="https://.../tileset.json"
+                    onChange={(e) => props.onChangeCustomTilesetUrl(e.target.value)}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={props.onLoadCustomTileset}
+                    disabled={props.isExtractingBuildings || !props.customTilesetUrl.trim()}
+                  >
+                    提取
+                  </button>
+                </div>
               </div>
 
               <div className="stat-pills">

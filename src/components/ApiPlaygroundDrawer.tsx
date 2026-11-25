@@ -25,9 +25,9 @@ const DEFAULT_PAYLOAD = JSON.stringify(
     levels: [5, 6, 7],
     corridorRadiusMeters: 20,
     coordinates: [
-      { lon: 114.0535, lat: 22.5405, height: 140 },
-      { lon: 114.0575, lat: 22.5425, height: 165 },
-      { lon: 114.0615, lat: 22.5452, height: 185 },
+      { lon: 116.308, lat: 39.9902, height: 140 },
+      { lon: 116.3126, lat: 39.9932, height: 165 },
+      { lon: 116.317, lat: 39.9958, height: 185 },
     ],
   },
   null,

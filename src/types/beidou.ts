@@ -153,6 +153,21 @@ export interface PathGridGenerationResponse {
   }>;
 }
 
+export interface ViewportBounds {
+  minLon: number;
+  maxLon: number;
+  minLat: number;
+  maxLat: number;
+}
+
+export interface CameraViewInfo {
+  cameraHeightMeters: number;
+  centerLon: number;
+  centerLat: number;
+  adaptiveLevel: GridLevel;
+  viewportBounds: ViewportBounds;
+}
+
 export interface CityPreset {
   id: string;
   name: string;
@@ -162,20 +177,7 @@ export interface CityPreset {
   height: number;
   heading: number;
   pitch: number;
-  tilesetKey?: 'shenzhen' | 'luohu' | 'guangzhou' | 'hongkong' | 'sample-cbd';
   roiRadiusDeg: number;
-}
-
-export interface LocalAssetsAvailability {
-  tiles: boolean;
-  terrain: boolean;
-  tilesets: {
-    shenzhen: boolean;
-    luohu: boolean;
-    guangzhou: boolean;
-    hongkong: boolean;
-    macau: boolean;
-  };
 }
 
 export interface TelemetrySnapshot {

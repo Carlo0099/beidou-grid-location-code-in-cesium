@@ -19,3 +19,6 @@ Thumbs.db
 !.vscode/extensions.json
 *.log
 *.tsbuildinfo
+
+# Local Git Sync Notes
+GIT_SYNC.md

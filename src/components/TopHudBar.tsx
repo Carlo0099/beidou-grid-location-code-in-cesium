@@ -18,7 +18,9 @@ export const TopHudBar: React.FC<TopHudBarProps> = ({
   const altStr =
     telemetry.cameraHeightMeters >= 10000
       ? `${(telemetry.cameraHeightMeters / 1000).toFixed(1)} km`
-      : `${Math.round(telemetry.cameraHeightMeters)} m`;
+      : telemetry.cameraHeightMeters >= 10
+        ? `${Math.round(telemetry.cameraHeightMeters)} m`
+        : `${telemetry.cameraHeightMeters.toFixed(2)} m`;
 
   return (
     <header className="top-hud glass-panel">

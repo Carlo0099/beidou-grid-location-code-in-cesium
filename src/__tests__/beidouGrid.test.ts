@@ -8,6 +8,7 @@ import {
   encode3D,
   extract2DCode,
   getNeighbors,
+  recommendLevelFromAltitude,
   validateCode,
 } from '../core/BeidouGridCode';
 import {
@@ -16,7 +17,10 @@ import {
   tracePathToBeidouGrids,
 } from '../core/BeidouGridEngine';
 import { voxelizeBuildingsToBeidouAirspace } from '../core/AirspaceVoxelizer';
-import { createSampleCbdBuildings, FLIGHT_PRESETS } from '../core/SampleCityData';
+import {
+  createConflictFlightRouteAt,
+  createSampleCbdBuildings,
+} from '../core/SampleCityData';
 import {
   extractWgs84PointsFromGeoJson,
   generatePathGridsPure,
@@ -119,7 +123,7 @@ test('Building voxelization generates obstacle + buffer voxels and detects fligh
   assert.ok(vox.airspaceStrataCells.length > 10, 'should generate strata cells');
 
   // 穿楼测试航线应触发避障冲突并成功规划绿色无冲突绕飞航线
-  const crossFlight = FLIGHT_PRESETS[0].waypoints;
+  const crossFlight = createConflictFlightRouteAt(114.057868, 22.543099);
   const analysis = analyzeFlightPlanAndDetour(
     crossFlight,
     vox.obstacleCells,
@@ -266,5 +270,22 @@ test('TilesetBuildingExtractor extracts convex hull footprints from binary GLB',
   assert.equal(extracted.length, 1);
   assert.ok(extracted[0].roofHeight > 115 && extracted[0].roofHeight < 125);
   assert.equal(extracted[0].polygon.length, 4);
+});
+
+test('recommendLevelFromAltitude adapts across all levels 1 to 10', () => {
+  const altitudes = [
+    5_000_000,
+    500_000,
+    120_000,
+    18_000,
+    1_500,
+    400,
+    80,
+    10,
+    2,
+    0.4,
+  ];
+  const levels = altitudes.map((h) => recommendLevelFromAltitude(h));
+  assert.deepEqual(levels, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 });
 

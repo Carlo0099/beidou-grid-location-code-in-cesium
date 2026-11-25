@@ -776,17 +776,19 @@ export function getNeighbors(code: string): GridNeighbors {
 }
 
 /**
- * 根据相机海拔高度自适应推荐北斗网格级别
+ * 根据相机海拔高度自适应推荐北斗网格级别 (1-10级全覆盖，匹配视口尺寸)
  */
 export function recommendLevelFromAltitude(altitudeMeters: number): GridLevel {
-  if (altitudeMeters > 2_500_000) return 1;
-  if (altitudeMeters > 450_000) return 2;
-  if (altitudeMeters > 120_000) return 3;
-  if (altitudeMeters > 18_000) return 4;
-  if (altitudeMeters > 3_500) return 5;
-  if (altitudeMeters > 900) return 6;
-  if (altitudeMeters > 180) return 7;
-  return 8;
+  if (altitudeMeters > 1_200_000) return 1;
+  if (altitudeMeters > 220_000) return 2;
+  if (altitudeMeters > 65_000) return 3;
+  if (altitudeMeters > 6_500) return 4;
+  if (altitudeMeters > 750) return 5;
+  if (altitudeMeters > 240) return 6;
+  if (altitudeMeters > 32) return 7;
+  if (altitudeMeters > 4.5) return 8;
+  if (altitudeMeters > 0.75) return 9;
+  return 10;
 }
 
 export const BeidouGridCode = {

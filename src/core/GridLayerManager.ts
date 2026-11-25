@@ -7,7 +7,13 @@ import type {
   GridLevel,
   Wgs84Point,
 } from '../types/beidou';
-import { encode2D, getLevelSpec } from './BeidouGridCode';
+import {
+  decode2D,
+  encode2D,
+  encode3D,
+  getHeightResolution,
+  getLevelSpec,
+} from './BeidouGridCode';
 
 const CATEGORY_STYLE: Record<
   GridCellCategory,
@@ -79,11 +85,11 @@ function computeCellEnuModelMatrix(
   forceFlat2D: boolean,
   flatBaseAltitude?: number,
 ): Cesium.Matrix4 {
-  const height = forceFlat2D
-    ? 0.4
-    : Math.max(0.5, cell.maxHeight - cell.minHeight);
+  const heightSpan = Math.max(0.004, cell.maxHeight - cell.minHeight);
+  const flatThickness = Math.min(0.4, Math.max(0.004, heightSpan * 0.25));
+  const height = forceFlat2D ? flatThickness : heightSpan;
   const centerH = forceFlat2D
-    ? (flatBaseAltitude ?? cell.minHeight) + 0.2
+    ? (flatBaseAltitude ?? cell.minHeight) + flatThickness * 0.5
     : cell.centerHeight;
 
   const center = Cesium.Cartesian3.fromDegrees(cell.centerLon, cell.centerLat, centerH);
@@ -94,8 +100,8 @@ function computeCellEnuModelMatrix(
   const pSouth = Cesium.Cartesian3.fromDegrees(cell.centerLon, cell.minLat, centerH);
   const pNorth = Cesium.Cartesian3.fromDegrees(cell.centerLon, cell.maxLat, centerH);
 
-  const widthX = Math.max(0.4, Cesium.Cartesian3.distance(pWest, pEast));
-  const depthY = Math.max(0.4, Cesium.Cartesian3.distance(pSouth, pNorth));
+  const widthX = Math.max(0.004, Cesium.Cartesian3.distance(pWest, pEast));
+  const depthY = Math.max(0.004, Cesium.Cartesian3.distance(pSouth, pNorth));
 
   const scale = Cesium.Matrix4.fromScale(new Cesium.Cartesian3(widthX, depthY, height));
   return Cesium.Matrix4.multiply(enu, scale, new Cesium.Matrix4());
@@ -221,8 +227,12 @@ export class GridLayerManager {
       });
       const width = isOuter ? 1.25 : 1.0;
 
+      // 纬线环与子午面分割保护：经度范围 [-180, 180]，纬度 [-88, 88]
+      const latLoopMin = Math.max(-88, minLat);
+      const latLoopMax = Math.min(88, maxLat);
+
       // 纬线环
-      for (let lat = minLat; lat <= maxLat + 1e-6; lat += stepLat) {
+      for (let lat = latLoopMin; lat <= latLoopMax + 1e-6; lat += stepLat) {
         const pts: Cesium.Cartesian3[] = [];
         for (let lon = minLon; lon < maxLon - 1e-6; lon += arcStepDeg) {
           pts.push(Cesium.Cartesian3.fromDegrees(lon, lat, alt));
@@ -234,10 +244,10 @@ export class GridLayerManager {
       // 经线弧（避免 180° 与 -180° 重复绘制）
       for (let lon = minLon; lon < maxLon - 1e-6; lon += stepLon) {
         const pts: Cesium.Cartesian3[] = [];
-        for (let lat = minLat; lat < maxLat - 1e-6; lat += arcStepDeg) {
+        for (let lat = latLoopMin; lat < latLoopMax - 1e-6; lat += arcStepDeg) {
           pts.push(Cesium.Cartesian3.fromDegrees(lon, lat, alt));
         }
-        pts.push(Cesium.Cartesian3.fromDegrees(lon, maxLat, alt));
+        pts.push(Cesium.Cartesian3.fromDegrees(lon, latLoopMax, alt));
         polylineCollection.add({ positions: pts, width, material: mat });
       }
     }
@@ -247,7 +257,7 @@ export class GridLayerManager {
       const pillarMat = Cesium.Material.fromType('Color', {
         color: Cesium.Color.WHITE.withAlpha(0.24),
       });
-      for (let lat = minLat; lat <= maxLat + 1e-6; lat += stepLat) {
+      for (let lat = Math.max(-88, minLat); lat <= Math.min(88, maxLat) + 1e-6; lat += stepLat) {
         for (let lon = minLon; lon < maxLon - 1e-6; lon += stepLon) {
           polylineCollection.add({
             positions: [
@@ -266,27 +276,27 @@ export class GridLayerManager {
     let labels: Cesium.LabelCollection | null = null;
     if (options?.showLabels !== false) {
       labels = new Cesium.LabelCollection({ scene: this.viewer.scene });
-      const labelStepLon = stepLon * (level === 1 ? 2 : 1);
-      const labelStepLat = stepLat * (level === 1 ? 2 : 1);
-      let labelCount = 0;
+      // 全球宏观视野每一个网格均附带编码标注
+      const latStart = Math.max(-88, minLat);
+      const latEnd = Math.min(88, maxLat);
 
-      for (let lat = minLat + stepLat * 0.5; lat < maxLat; lat += labelStepLat) {
-        for (let lon = minLon + stepLon * 0.5; lon < maxLon; lon += labelStepLon) {
-          if (labelCount >= 180 || lon >= 179.9 || Math.abs(lat) > 85) continue;
+      for (let lat = latStart + stepLat * 0.5; lat < latEnd; lat += stepLat) {
+        for (let lon = minLon + stepLon * 0.5; lon < maxLon; lon += stepLon) {
+          if (lon >= 179.99 || lon <= -179.99 || Math.abs(lat) > 87.9) continue;
           const code = encode2D(lat, lon, level);
           labels.add({
-            position: Cesium.Cartesian3.fromDegrees(lon, lat, topAlt + 12000),
+            position: Cesium.Cartesian3.fromDegrees(lon, lat, topAlt + 15000),
             text: code,
-            font: '600 12px Consolas, "Microsoft YaHei", monospace',
-            fillColor: Cesium.Color.WHITE.withAlpha(0.92),
-            outlineColor: Cesium.Color.BLACK.withAlpha(0.85),
+            font: '600 11px Consolas, "Microsoft YaHei", monospace',
+            fillColor: Cesium.Color.WHITE.withAlpha(0.96),
+            outlineColor: Cesium.Color.BLACK.withAlpha(0.92),
             outlineWidth: 2,
             style: Cesium.LabelStyle.FILL_AND_OUTLINE,
             horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
             verticalOrigin: Cesium.VerticalOrigin.CENTER,
-            scaleByDistance: new Cesium.NearFarScalar(2_000_000, 1.0, 22_000_000, 0.55),
+            scaleByDistance: new Cesium.NearFarScalar(2_000_000, 1.0, 24_000_000, 0.55),
+            translucencyByDistance: new Cesium.NearFarScalar(8_000_000, 1.0, 17_800_000, 0.08),
           });
-          labelCount++;
         }
       }
       this.viewer.scene.primitives.add(labels);
@@ -300,6 +310,388 @@ export class GridLayerManager {
     });
 
     return Math.round((maxLon - minLon) / stepLon) * Math.round((maxLat - minLat) / stepLat);
+  }
+
+  /**
+   * L2-L10 视口自适应北斗网格渲染：
+   * 1. 按当前相机视口地理范围满屏铺开且严格对齐北斗网格边界
+   * 2. 使用 PolylineCollection 消除相邻网格双线重影并稳定维持 120 FPS
+   * 3. 对 L7-L10 长编码自动双行折行 + 屏幕空间包围盒防重叠剔除，确保标注清晰可读
+   */
+  renderViewportGrid(
+    layerId: string,
+    bounds: { minLon: number; maxLon: number; minLat: number; maxLat: number },
+    level: GridLevel,
+    options?: {
+      layerStyle?: GridLayerStyle;
+      showLabels?: boolean;
+      cameraHeightMeters?: number;
+    },
+  ): number {
+    this.clearLayer(layerId);
+    if (this.viewer.isDestroyed()) return 0;
+
+    const minLonRaw = Math.max(-179.95, Math.min(179.95, bounds.minLon));
+    const maxLonRaw = Math.max(-179.95, Math.min(179.95, bounds.maxLon));
+    const minLatRaw = Math.max(-85, Math.min(85, bounds.minLat));
+    const maxLatRaw = Math.max(-85, Math.min(85, bounds.maxLat));
+    if (minLonRaw >= maxLonRaw || minLatRaw >= maxLatRaw) return 0;
+
+    const spec = getLevelSpec(level);
+    const first = decode2D(encode2D(minLatRaw, minLonRaw, level));
+    const last = decode2D(encode2D(maxLatRaw, maxLonRaw, level));
+
+    const roughSpanLon = Math.max(spec.lonDeg, last.maxLon - first.minLon);
+    const roughSpanLat = Math.max(spec.latDeg, last.maxLat - first.minLat);
+    const nativeCols = Math.max(1, Math.round(roughSpanLon / spec.lonDeg));
+    const nativeRows = Math.max(1, Math.round(roughSpanLat / spec.latDeg));
+
+    // 当视口内原生网格过于密集时，按 2 的幂对齐北斗边界抽稀以维持视口清晰度与满屏铺设
+    const rawStride = Math.max(1, Math.ceil(Math.max(nativeCols / 76, nativeRows / 60)));
+    let stride = 1;
+    while (stride < rawStride) stride *= 2;
+
+    const stepLon = spec.lonDeg * stride;
+    const stepLat = spec.latDeg * stride;
+
+    // 对齐全球固定 stepLon / stepLat 网格索引，避免斜视/平移时网格线抖动
+    const snapMinLon = Math.max(-180, Math.floor(first.minLon / stepLon) * stepLon);
+    const snapMaxLon = Math.min(180, Math.ceil(last.maxLon / stepLon) * stepLon);
+    const snapMinLat = Math.max(-85, Math.floor(first.minLat / stepLat) * stepLat);
+    const snapMaxLat = Math.min(85, Math.ceil(last.maxLat / stepLat) * stepLat);
+
+    const lons: number[] = [snapMinLon];
+    for (let i = 1; i <= 96; i++) {
+      const v = snapMinLon + i * stepLon;
+      lons.push(Math.min(180, v));
+      if (v >= snapMaxLon - stepLon * 0.05) break;
+    }
+    const lats: number[] = [snapMinLat];
+    for (let j = 1; j <= 84; j++) {
+      const v = snapMinLat + j * stepLat;
+      lats.push(Math.min(85, v));
+      if (v >= snapMaxLat - stepLat * 0.05) break;
+    }
+    if (lons.length < 2 || lats.length < 2) return 0;
+
+    const style = options?.layerStyle ?? '3d-wireframe';
+    const camH = Math.max(0.08, options?.cameraHeightMeters ?? 1000);
+    const baseAlt =
+      camH > 20_000 ? 80 : camH > 500 ? 1.5 : Math.max(0.004, camH * 0.008);
+    const heightRes = getHeightResolution(level);
+    // 多层三维空域网格：在 3D 模式下绘制 3 个垂向叠加层（4 层水平网面 + 贯通垂向立柱）
+    const layerCount = 3;
+    const layerStep = Math.min(heightRes, Math.max(0.006, camH * 0.13));
+    const layerAlts = Array.from({ length: layerCount + 1 }, (_, k) => baseAlt + k * layerStep);
+    const topAlt = layerAlts[layerAlts.length - 1];
+
+    const is2DOnly = style === '2d-plane';
+    const polylineCollection = new Cesium.PolylineCollection();
+    const arcSubdiv = stepLon > 0.35 ? 6 : 1;
+
+    const addLatLonMesh = (alt: number, mat: Cesium.Material, width: number) => {
+      for (let r = 0; r < lats.length; r++) {
+        const lat = lats[r];
+        const pts: Cesium.Cartesian3[] = [];
+        for (let c = 0; c < lons.length - 1; c++) {
+          const lonA = lons[c];
+          const lonB = lons[c + 1];
+          for (let s = 0; s < arcSubdiv; s++) {
+            const t = s / arcSubdiv;
+            pts.push(Cesium.Cartesian3.fromDegrees(lonA + (lonB - lonA) * t, lat, alt));
+          }
+        }
+        pts.push(Cesium.Cartesian3.fromDegrees(lons[lons.length - 1], lat, alt));
+        polylineCollection.add({ positions: pts, width, material: mat });
+      }
+
+      for (let c = 0; c < lons.length; c++) {
+        const lon = lons[c];
+        const pts: Cesium.Cartesian3[] = [];
+        for (let r = 0; r < lats.length - 1; r++) {
+          const latA = lats[r];
+          const latB = lats[r + 1];
+          for (let s = 0; s < arcSubdiv; s++) {
+            const t = s / arcSubdiv;
+            pts.push(Cesium.Cartesian3.fromDegrees(lon, latA + (latB - latA) * t, alt));
+          }
+        }
+        pts.push(Cesium.Cartesian3.fromDegrees(lon, lats[lats.length - 1], alt));
+        polylineCollection.add({ positions: pts, width, material: mat });
+      }
+    };
+
+    const baseLineMat = Cesium.Material.fromType('Color', {
+      color: Cesium.Color.fromCssColorString('#e0f2fe').withAlpha(is2DOnly ? 0.85 : 0.78),
+    });
+    addLatLonMesh(baseAlt, baseLineMat, is2DOnly ? 1.4 : 1.25);
+
+    if (!is2DOnly) {
+      const midLineMat = Cesium.Material.fromType('Color', {
+        color: Cesium.Color.fromCssColorString('#7dd3fc').withAlpha(0.36),
+      });
+      const topLineMat = Cesium.Material.fromType('Color', {
+        color: Cesium.Color.fromCssColorString('#bae6fd').withAlpha(0.62),
+      });
+      const pillarMat = Cesium.Material.fromType('Color', {
+        color: Cesium.Color.WHITE.withAlpha(0.24),
+      });
+
+      for (let li = 1; li < layerAlts.length; li++) {
+        const isTop = li === layerAlts.length - 1;
+        addLatLonMesh(
+          layerAlts[li],
+          isTop ? topLineMat : midLineMat,
+          isTop ? 1.15 : 0.95,
+        );
+      }
+
+      const pillarStep = lats.length * lons.length > 1800 ? 2 : 1;
+      for (let r = 0; r < lats.length; r += pillarStep) {
+        for (let c = 0; c < lons.length; c += pillarStep) {
+          polylineCollection.add({
+            positions: [
+              Cesium.Cartesian3.fromDegrees(lons[c], lats[r], baseAlt),
+              Cesium.Cartesian3.fromDegrees(lons[c], lats[r], topAlt),
+            ],
+            width: 1.0,
+            material: pillarMat,
+          });
+        }
+      }
+    }
+
+    this.viewer.scene.primitives.add(polylineCollection);
+
+    const primitives: Cesium.Primitive[] = [];
+    const colsCount = lons.length - 1;
+    const rowsCount = lats.length - 1;
+
+    if (
+      (style === 'translucent-volume' || style === 'hybrid' || style === '2d-plane') &&
+      colsCount * rowsCount <= 2000
+    ) {
+      const boxGeo = getUnitBoxGeometry();
+      const fillInstances: Cesium.GeometryInstance[] = [];
+      const volLayerLimit = is2DOnly
+        ? 1
+        : colsCount * rowsCount <= 550
+          ? layerCount
+          : 1;
+      const fillAlpha = is2DOnly ? 0.05 : style === 'hybrid' ? 0.08 : 0.065;
+      const fillColor = Cesium.Color.fromCssColorString('#38bdf8').withAlpha(fillAlpha);
+
+      for (let lk = 0; lk < volLayerLimit; lk++) {
+        const minH = layerAlts[lk];
+        const maxH = is2DOnly ? baseAlt + 0.01 : layerAlts[lk + 1];
+        const midH = (minH + maxH) * 0.5;
+
+        for (let r = 0; r < rowsCount; r++) {
+          for (let c = 0; c < colsCount; c++) {
+            const cMinLon = lons[c];
+            const cMaxLon = lons[c + 1];
+            const cMinLat = lats[r];
+            const cMaxLat = lats[r + 1];
+            const cLon = (cMinLon + cMaxLon) * 0.5;
+            const cLat = (cMinLat + cMaxLat) * 0.5;
+            const code2D = encode2D(cLat, cLon, level);
+            const cellObj: BeidouVoxelCell = {
+              id: `vp#${code2D}#Z${lk}`,
+              code2D,
+              code3D: encode3D(cLat, cLon, midH, level),
+              level,
+              minLon: cMinLon,
+              maxLon: cMaxLon,
+              minLat: cMinLat,
+              maxLat: cMaxLat,
+              minHeight: minH,
+              maxHeight: maxH,
+              centerLon: cLon,
+              centerLat: cLat,
+              centerHeight: midH,
+              category: 'local-airspace',
+            };
+
+            fillInstances.push(
+              new Cesium.GeometryInstance({
+                geometry: boxGeo,
+                modelMatrix: computeCellEnuModelMatrix(cellObj, is2DOnly, baseAlt),
+                id: cellObj,
+                attributes: {
+                  color: Cesium.ColorGeometryInstanceAttribute.fromColor(fillColor),
+                },
+              }),
+            );
+          }
+        }
+      }
+
+      if (fillInstances.length > 0) {
+        const fillPrimitive = new Cesium.Primitive({
+          geometryInstances: fillInstances,
+          appearance: new Cesium.PerInstanceColorAppearance({
+            flat: true,
+            translucent: true,
+            renderState: {
+              depthTest: { enabled: true },
+              depthMask: false,
+              cull: { enabled: false },
+            },
+          }),
+          asynchronous: false,
+        });
+        this.viewer.scene.primitives.add(fillPrimitive);
+        primitives.push(fillPrimitive);
+      }
+    }
+
+    let labels: Cesium.LabelCollection | null = null;
+    if (options?.showLabels !== false) {
+      labels = new Cesium.LabelCollection({ scene: this.viewer.scene });
+      const canvas = this.viewer.scene.canvas;
+      const viewW = canvas.clientWidth || 1280;
+      const viewH = canvas.clientHeight || 720;
+      const labelAlt = baseAlt + Math.max(0.002, camH * 0.003);
+      const labelBg = Cesium.Color.fromCssColorString('#040a18').withAlpha(0.68);
+
+      interface LabelCandidate {
+        pos: Cesium.Cartesian3;
+        text: string;
+        sx: number;
+        sy: number;
+        halfW: number;
+        halfH: number;
+        distCenter: number;
+      }
+
+      const candidates: LabelCandidate[] = [];
+
+      for (let r = 0; r < rowsCount; r++) {
+        for (let c = 0; c < colsCount; c++) {
+          const cMinLon = lons[c];
+          const cMaxLon = lons[c + 1];
+          const cMinLat = lats[r];
+          const cMaxLat = lats[r + 1];
+          const cLon = (cMinLon + cMaxLon) * 0.5;
+          const cLat = (cMinLat + cMaxLat) * 0.5;
+
+          const worldPos = Cesium.Cartesian3.fromDegrees(cLon, cLat, labelAlt);
+          const screenPos = Cesium.SceneTransforms.worldToWindowCoordinates(
+            this.viewer.scene,
+            worldPos,
+          );
+          if (
+            !screenPos ||
+            screenPos.x < 18 ||
+            screenPos.x > viewW - 18 ||
+            screenPos.y < 18 ||
+            screenPos.y > viewH - 18
+          ) {
+            continue;
+          }
+
+          // 检查当前格子两个正交方向在屏幕上的像素跨度，适配任意航向角与斜视角
+          const eastPos = Cesium.Cartesian3.fromDegrees(cMaxLon, cLat, labelAlt);
+          const northPos = Cesium.Cartesian3.fromDegrees(cLon, cMaxLat, labelAlt);
+          const eastScreen = Cesium.SceneTransforms.worldToWindowCoordinates(
+            this.viewer.scene,
+            eastPos,
+          );
+          const northScreen = Cesium.SceneTransforms.worldToWindowCoordinates(
+            this.viewer.scene,
+            northPos,
+          );
+          const eastHalfPx = eastScreen
+            ? Math.hypot(eastScreen.x - screenPos.x, eastScreen.y - screenPos.y)
+            : 20;
+          const northHalfPx = northScreen
+            ? Math.hypot(northScreen.x - screenPos.x, northScreen.y - screenPos.y)
+            : 20;
+          const maxSpanHalfPx = Math.max(eastHalfPx, northHalfPx);
+          const minSpanHalfPx = Math.min(eastHalfPx, northHalfPx);
+          if (maxSpanHalfPx < 11 || minSpanHalfPx < 3.5) continue;
+
+          const rawCode = encode2D(cLat, cLon, level);
+          let displayText = rawCode;
+          let maxLineLen = rawCode.length;
+          let lineCount = 1;
+
+          // L7-L10 长编码双行居中折行，宽度减半，避免横向文本挤压重叠
+          if (level >= 7 && rawCode.length > 11) {
+            const mid = Math.ceil(rawCode.length / 2);
+            const topPart = rawCode.slice(0, mid);
+            const bottomPart = rawCode.slice(mid);
+            displayText = `${topPart}\n${bottomPart}`;
+            maxLineLen = Math.max(topPart.length, bottomPart.length);
+            lineCount = 2;
+          }
+
+          const halfW = (maxLineLen * 6.4 + 12) * 0.5 + 4;
+          const halfH = (lineCount * 13 + 6) * 0.5 + 3;
+          // 优先标注近景与视口地面重心区域（不受仰视天空上半区偏向影响）
+          const distCenter = Math.hypot(screenPos.x - viewW * 0.5, screenPos.y - viewH * 0.66);
+
+          candidates.push({
+            pos: worldPos,
+            text: displayText,
+            sx: screenPos.x,
+            sy: screenPos.y,
+            halfW,
+            halfH,
+            distCenter,
+          });
+        }
+      }
+
+      // 优先保留视口中心附近清晰标注，屏幕空间包围盒防碰撞剔除
+      candidates.sort((a, b) => a.distCenter - b.distCenter);
+      const placed: Array<{ minX: number; maxX: number; minY: number; maxY: number }> = [];
+
+      for (const item of candidates) {
+        const minX = item.sx - item.halfW;
+        const maxX = item.sx + item.halfW;
+        const minY = item.sy - item.halfH;
+        const maxY = item.sy + item.halfH;
+
+        let overlaps = false;
+        for (let k = 0; k < placed.length; k++) {
+          const p = placed[k];
+          if (!(maxX < p.minX || minX > p.maxX || maxY < p.minY || minY > p.maxY)) {
+            overlaps = true;
+            break;
+          }
+        }
+        if (overlaps) continue;
+
+        placed.push({ minX, maxX, minY, maxY });
+        labels.add({
+          position: item.pos,
+          text: item.text,
+          font: '600 10.5px Consolas, monospace',
+          fillColor: Cesium.Color.WHITE,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          showBackground: true,
+          backgroundColor: labelBg,
+          backgroundPadding: new Cesium.Cartesian2(5, 3),
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          disableDepthTestDistance: camH < 200_000 ? Number.POSITIVE_INFINITY : 0,
+        });
+      }
+
+      this.viewer.scene.primitives.add(labels);
+    }
+
+    this.layerGroups.set(layerId, {
+      primitives,
+      polylines: polylineCollection,
+      labels,
+      entities: [],
+    });
+
+    return colsCount * rowsCount;
   }
 
   /**
@@ -453,22 +845,20 @@ export class GridLayerManager {
 
       for (let i = 0; i < pool.length; i += step) {
         const c = pool[i];
+        const labelZ = is2DOnly
+          ? (options?.flatBaseAltitude ?? c.minHeight) + Math.max(0.05, (c.maxHeight - c.minHeight) * 0.05)
+          : c.centerHeight;
         labels.add({
-          position: Cesium.Cartesian3.fromDegrees(
-            c.centerLon,
-            c.centerLat,
-            is2DOnly ? (options?.flatBaseAltitude ?? c.minHeight) + 2 : c.maxHeight + 1.5,
-          ),
-          text: c.label ?? (c.level >= 6 ? c.code3D : c.code2D),
+          position: Cesium.Cartesian3.fromDegrees(c.centerLon, c.centerLat, labelZ),
+          text: c.label ?? (style === '2d-plane' ? c.code2D : c.code3D),
           font: '600 11px Consolas, monospace',
           fillColor: Cesium.Color.WHITE,
           outlineColor: Cesium.Color.BLACK,
           outlineWidth: 2,
           style: Cesium.LabelStyle.FILL_AND_OUTLINE,
           horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
-          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-          distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 18000),
-          scaleByDistance: new Cesium.NearFarScalar(80, 1.0, 5000, 0.45),
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          scaleByDistance: new Cesium.NearFarScalar(5, 1.0, 3_000_000, 0.68),
         });
       }
       this.viewer.scene.primitives.add(labels);
