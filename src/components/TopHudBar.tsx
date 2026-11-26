@@ -9,7 +9,7 @@ interface TopHudBarProps {
   onOpenApiModal: () => void;
 }
 
-export const TopHudBar: React.FC<TopHudBarProps> = ({
+export const TopHudBar: React.FC<TopHudBarProps> = React.memo(({
   telemetry,
   workbenchOpen,
   onToggleWorkbench,
@@ -61,7 +61,7 @@ export const TopHudBar: React.FC<TopHudBarProps> = ({
           <span className="hud-metric-label">实时光标 WGS84</span>
           <span className="hud-metric-val">
             {telemetry.mouseLon !== null && telemetry.mouseLat !== null
-              ? `${telemetry.mouseLon.toFixed(6)}°, ${telemetry.mouseLat.toFixed(6)}° (${Math.round(telemetry.mouseHeight ?? 0)}m)`
+              ? `${telemetry.mouseLon.toFixed(telemetry.adaptiveLevel >= 8 ? 7 : 6)}°, ${telemetry.mouseLat.toFixed(telemetry.adaptiveLevel >= 8 ? 7 : 6)}° (${Math.round(telemetry.mouseHeight ?? 0)}m)`
               : '-- , --'}
           </span>
         </div>
@@ -95,4 +95,4 @@ export const TopHudBar: React.FC<TopHudBarProps> = ({
       </div>
     </header>
   );
-};
+});

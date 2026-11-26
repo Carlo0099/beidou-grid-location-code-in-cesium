@@ -5,13 +5,18 @@ import React, {
   useRef,
   useState,
 } from "react";
-import type {
-  BeidouVoxelCell,
-  BuildingFootprint,
-  CameraViewInfo,
-  FlightPathAnalysisResult,
+import {
+  DEFAULT_ELEVATION_THRESHOLDS,
+  type BeidouVoxelCell,
+  type BuildingFootprint,
+  type CameraViewInfo,
+  type ElevationColorThresholds,
+  type FlightPathAnalysisResult,
   GridLayerStyle,
   GridLevel,
+  MassiveVoxelLodMode,
+  MassiveVoxelStats,
+  MassiveVoxelStyle,
   PathGridGenerationResponse,
   TelemetrySnapshot,
   Wgs84Point,
@@ -36,6 +41,14 @@ import {
   FLIGHT_PRESETS,
   GLOBAL_CAMERA_VIEW,
 } from "./core/SampleCityData";
+import {
+  buildSparseVoxelIndexFromTileset,
+  FUTIAN_DEMO_TILESET_URL,
+  FUTIAN_LANDMARKS,
+  type FutianLandmarkPreset,
+  type SparseBeidouVoxelIndex,
+  planMassiveVoxelRenderFrame,
+} from "./core/MassiveVoxelEngine";
 import { CESIUM_ION_TOKEN } from "./api/gisDataConfig";
 import {
   createRuntimeBeidouGridApi,
@@ -45,7 +58,14 @@ import {
   CesiumViewport,
   type CesiumSceneHandle,
 } from "./components/CesiumViewport";
-import { ControlPanel, type WorkbenchTab } from "./components/ControlPanel";
+import {
+  ControlPanel,
+  type DynamicApiPanelProps,
+  type FutianVoxelPanelProps,
+  type GlobalGridPanelProps,
+  type ObstacleAvoidancePanelProps,
+  type WorkbenchTab,
+} from "./components/ControlPanel";
 import { TopHudBar } from "./components/TopHudBar";
 import { GridInspectorCard } from "./components/GridInspectorCard";
 import { ApiPlaygroundDrawer } from "./components/ApiPlaygroundDrawer";
@@ -77,6 +97,11 @@ export function App() {
   // 1.1 Global & Adaptive L1-L10 Beidou Grid state (strictly decoupled from 1.2)
   const [cameraView, setCameraView] = useState<CameraViewInfo>({
     cameraHeightMeters: GLOBAL_CAMERA_VIEW.height,
+    cameraLon: GLOBAL_CAMERA_VIEW.lon,
+    cameraLat: GLOBAL_CAMERA_VIEW.lat,
+    cameraHeadingDeg: 0,
+    cameraPitchDeg: -90,
+    viewTargetDistanceMeters: GLOBAL_CAMERA_VIEW.height,
     centerLon: GLOBAL_CAMERA_VIEW.lon,
     centerLat: GLOBAL_CAMERA_VIEW.lat,
     adaptiveLevel: 1,
@@ -140,6 +165,34 @@ export function App() {
     useState<GridLayerStyle>("translucent-volume");
   const [apiPathResult, setApiPathResult] =
     useState<PathGridGenerationResponse | null>(null);
+
+  // 1.4 Futian 3D Tiles & Massive Billion-Scale Voxel Simulation state
+  const [futianVoxelIndex, setFutianVoxelIndex] =
+    useState<SparseBeidouVoxelIndex | null>(null);
+  const [futianStats, setFutianStats] = useState<MassiveVoxelStats | null>(
+    null,
+  );
+  const [isIndexingFutian, setIsIndexingFutian] = useState<boolean>(false);
+  const [futianIndexProgress, setFutianIndexProgress] = useState<{
+    parsed: number;
+    total: number;
+  }>({ parsed: 0, total: 15 });
+  const [massiveVoxelStyle, setMassiveVoxelStyle] =
+    useState<MassiveVoxelStyle>("conformal-white");
+  const [massiveLodMode, setMassiveLodMode] = useState<MassiveVoxelLodMode>(
+    "auto",
+  );
+  const [includeGroundCarpet, setIncludeGroundCarpet] =
+    useState<boolean>(true);
+  const [minElevationFilterMeters, setMinElevationFilterMeters] =
+    useState<number>(0);
+  const [elevationThresholds, setElevationThresholds] =
+    useState<ElevationColorThresholds>(DEFAULT_ELEVATION_THRESHOLDS);
+  const [whiteModelOpacity, setWhiteModelOpacity] = useState<number>(1.0);
+  const [turbo244Mode, setTurbo244Mode] = useState<boolean>(false);
+  const [activeLandmarkId, setActiveLandmarkId] = useState<string>(
+    FUTIAN_LANDMARKS[0].id,
+  );
 
   // Inspector selection
   const [inspectedCell, setInspectedCell] = useState<BeidouVoxelCell | null>(
@@ -241,7 +294,98 @@ export function App() {
     }
   }, [customTilesetUrl]);
 
-  // 切换工作台标签时彻底隔离 1.1 与 1.2 图层状态
+  // 在 1.2 中加载项目内置的福田 3D Tiles 建筑白膜并提取轮廓做实时避障规划
+  const handleLoadFutianDemoForAvoidance = useCallback(async () => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    setIsExtractingBuildings(true);
+    const fLon = 114.055;
+    const fLat = 22.536;
+    try {
+      await scene.loadTilesetUrl(FUTIAN_DEMO_TILESET_URL, {
+        styleMode: "white-model",
+        opacity: 0.92,
+      });
+      scene.flyToUrbanView(fLon, fLat, 1100);
+      const extracted = await extractBuildingsFrom3DTileset(
+        FUTIAN_DEMO_TILESET_URL,
+        {
+          minLon: fLon - 0.008,
+          maxLon: fLon + 0.008,
+          minLat: fLat - 0.007,
+          maxLat: fLat + 0.007,
+        },
+        {
+          maxTiles: 8,
+          maxBuildings: 850,
+        },
+      );
+      scene.layerManager.clearLayer("sample-buildings");
+      setIsUsingProceduralBuildings(false);
+      setAirspaceCenter({ lon: fLon, lat: fLat });
+      if (extracted.length > 0) {
+        setBuildings(extracted);
+      }
+      if (selectedFlightPresetId === "obstacle-cross") {
+        setWaypoints(createConflictFlightRouteAt(fLon, fLat));
+      } else if (selectedFlightPresetId === "safe-corridor") {
+        setWaypoints(createCorridorFlightRouteAt(fLon, fLat));
+      }
+    } finally {
+      setIsExtractingBuildings(false);
+    }
+  }, [selectedFlightPresetId]);
+
+  // 1.4 加载福田 3D Tiles 建筑白膜并流式体素化全区 GLB
+  const startFutianVoxelSimulation = useCallback(
+    async (forceRebuild = false) => {
+      const scene = sceneRef.current;
+      if (!scene) return;
+
+      await scene.loadTilesetUrl(FUTIAN_DEMO_TILESET_URL, {
+        styleMode: "white-model",
+        opacity: whiteModelOpacity,
+      });
+
+      if (futianVoxelIndex && !forceRebuild) return;
+      if (isIndexingFutian) return;
+
+      setIsIndexingFutian(true);
+      setFutianIndexProgress({ parsed: 0, total: 15 });
+      try {
+        const idx = await buildSparseVoxelIndexFromTileset(
+          FUTIAN_DEMO_TILESET_URL,
+          (parsed, total, partial) => {
+            setFutianIndexProgress({ parsed, total });
+            setFutianStats(partial);
+          },
+        );
+        setFutianVoxelIndex(idx);
+        setFutianStats((prev) => ({
+          tilesTotal: idx.tilesTotal,
+          tilesParsed: idx.tilesParsed,
+          featureCount: idx.featureCount,
+          occupiedColumnsL7: idx.occupiedColumnsL7,
+          occupiedVoxelsL7: idx.occupiedVoxelsL7,
+          virtualCapacityL7: idx.virtualCapacityL7,
+          virtualCapacityL8: idx.virtualCapacityL8,
+          virtualCapacityL10: idx.virtualCapacityL10,
+          renderedVoxels: prev?.renderedVoxels ?? 0,
+          activeLevel: prev?.activeLevel ?? 7,
+          activeResolutionMeters: prev?.activeResolutionMeters ?? 7.73,
+          activeLevelLabel: prev?.activeLevelLabel ?? "L7 · 7.73m",
+          parseTimeMs: idx.parseTimeMs,
+        }));
+      } catch (err) {
+        console.warn("Futian GLB voxel indexing error:", err);
+      } finally {
+        setIsIndexingFutian(false);
+      }
+    },
+    [futianVoxelIndex, isIndexingFutian, whiteModelOpacity],
+  );
+
+  // 切换工作台标签时彻底隔离各模块图层与 3D Tiles 状态
   const handleChangeTab = useCallback(
     (nextTab: WorkbenchTab) => {
       setActiveTab(nextTab);
@@ -249,6 +393,21 @@ export function App() {
 
       if (nextTab !== "airspace-obstacle") {
         setIsSimulatingFlight(false);
+      }
+
+      if (nextTab === "futian-voxel-sim" && sceneReady) {
+        const landmark =
+          FUTIAN_LANDMARKS.find((l) => l.id === activeLandmarkId) ??
+          FUTIAN_LANDMARKS[0];
+        sceneRef.current?.flyToCamera(
+          landmark.lon,
+          landmark.lat,
+          landmark.height,
+          landmark.heading,
+          landmark.pitch,
+        );
+        void startFutianVoxelSimulation(false);
+        return;
       }
 
       if (nextTab === "airspace-obstacle" && sceneReady) {
@@ -279,6 +438,8 @@ export function App() {
     },
     [
       sceneReady,
+      activeLandmarkId,
+      startFutianVoxelSimulation,
       buildings,
       isUsingProceduralBuildings,
       airspaceCenter,
@@ -358,7 +519,7 @@ export function App() {
     maxAirspaceHeight,
   ]);
 
-  // 1.1 全球宏观与 1-10 级相机自适应网格渲染（彻底独立于 1.2）
+  // 1.1 全球宏观与 1-10 级相机自适应网格渲染（彻底独立于 1.2，rAF 合批 + L1 静态缓存）
   useEffect(() => {
     const mgr = sceneRef.current?.layerManager;
     if (!mgr) return;
@@ -369,32 +530,40 @@ export function App() {
       return;
     }
 
-    if (gridLevel === 1) {
-      mgr.clearLayer("local-airspace-grid");
-      if (showGlobalShell) {
-        mgr.renderGlobalShellGrid("global-shell-grid", 1, {
-          showLabels: showGridLabels,
-          layerStyle,
-        });
-      } else {
-        mgr.clearLayer("global-shell-grid");
+    const deferLabels = Boolean(cameraView.isInteracting);
+    const rafId = window.requestAnimationFrame(() => {
+      if (gridLevel === 1) {
+        mgr.clearLayer("local-airspace-grid");
+        if (showGlobalShell) {
+          mgr.renderGlobalShellGrid("global-shell-grid", 1, {
+            showLabels: showGridLabels,
+            layerStyle,
+            deferLabels,
+          });
+        } else {
+          mgr.clearLayer("global-shell-grid");
+        }
+        return;
       }
-      return;
-    }
 
-    // L2 - L10：清空粗粒度 L1 全球壳，按当前相机真实视口范围铺满对应级别北斗网格
-    mgr.clearLayer("global-shell-grid");
+      // L2 - L10：隐藏 L1 全球壳缓存，按当前相机真实视口范围铺满对应级别北斗网格
+      mgr.clearLayer("global-shell-grid");
 
-    if (!showLocalGrid) {
-      mgr.clearLayer("local-airspace-grid");
-      return;
-    }
+      if (!showLocalGrid) {
+        mgr.clearLayer("local-airspace-grid");
+        return;
+      }
 
-    mgr.renderViewportGrid("local-airspace-grid", cameraView.viewportBounds, gridLevel, {
-      layerStyle,
-      showLabels: showGridLabels,
-      cameraHeightMeters: cameraView.cameraHeightMeters,
+      mgr.renderViewportGrid("local-airspace-grid", cameraView.viewportBounds, gridLevel, {
+        layerStyle,
+        showLabels: showGridLabels,
+        cameraHeightMeters: cameraView.cameraHeightMeters,
+        deferLabels,
+        isInteracting: deferLabels,
+      });
     });
+
+    return () => window.cancelAnimationFrame(rafId);
   }, [
     sceneReady,
     activeTab,
@@ -405,6 +574,7 @@ export function App() {
     showGridLabels,
     cameraView.viewportBounds,
     cameraView.cameraHeightMeters,
+    cameraView.isInteracting,
   ]);
 
   // 1.2 空域分层、建筑体素、避障缓冲与飞行航线渲染
@@ -420,7 +590,9 @@ export function App() {
       mgr.clearLayer("flight-plan-route");
       mgr.clearLayer("flight-plan-voxels");
       mgr.clearLayer("live-flight-cell");
-      void sceneRef.current?.loadTilesetUrl(undefined);
+      if (activeTab !== "futian-voxel-sim") {
+        void sceneRef.current?.loadTilesetUrl(undefined);
+      }
       return;
     }
 
@@ -485,6 +657,88 @@ export function App() {
     showGridLabels,
     flightAnalysis,
     showDetourRoute,
+  ]);
+
+  // 1.4 亿级福田 3D Tiles 贴合体素视口分块池与 Worker 异步管线调度
+  useEffect(() => {
+    const mgr = sceneRef.current?.layerManager;
+    if (!mgr) return;
+
+    if (activeTab !== "futian-voxel-sim" || !futianVoxelIndex) {
+      mgr.clearLayer("futian-massive-voxels");
+      return;
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      const plan = planMassiveVoxelRenderFrame(
+        futianVoxelIndex,
+        cameraView.viewportBounds,
+        cameraView.cameraHeightMeters,
+        {
+          voxelStyle: massiveVoxelStyle,
+          lodMode: massiveLodMode,
+          includeGroundCarpet,
+          minElevationFilterMeters,
+          elevationThresholds,
+          cameraPos: {
+            lon: cameraView.cameraLon,
+            lat: cameraView.cameraLat,
+          },
+          cameraHeadingDeg: cameraView.cameraHeadingDeg,
+          cameraPitchDeg: cameraView.cameraPitchDeg,
+          viewTargetDistanceMeters: cameraView.viewTargetDistanceMeters,
+        },
+      );
+
+      const renderedBuildingCount = mgr.renderMassiveVoxelPlan(
+        "futian-massive-voxels",
+        plan,
+        (tightBuildingCols) => {
+          setFutianStats((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  renderedVoxels: tightBuildingCols + plan.groundCellCount,
+                }
+              : prev,
+          );
+        },
+      );
+
+      setFutianStats({
+        tilesTotal: futianVoxelIndex.tilesTotal,
+        tilesParsed: futianVoxelIndex.tilesParsed,
+        featureCount: futianVoxelIndex.featureCount,
+        occupiedColumnsL7: futianVoxelIndex.occupiedColumnsL7,
+        occupiedVoxelsL7: futianVoxelIndex.occupiedVoxelsL7,
+        virtualCapacityL7: futianVoxelIndex.virtualCapacityL7,
+        virtualCapacityL8: futianVoxelIndex.virtualCapacityL8,
+        virtualCapacityL10: futianVoxelIndex.virtualCapacityL10,
+        renderedVoxels: renderedBuildingCount + plan.groundCellCount,
+        activeLevel: plan.activeLevel,
+        activeResolutionMeters: plan.activeStepMeters,
+        activeLevelLabel: plan.activeLevelLabel,
+        parseTimeMs: futianVoxelIndex.parseTimeMs,
+      });
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [
+    sceneReady,
+    activeTab,
+    futianVoxelIndex,
+    cameraView.viewportBounds,
+    cameraView.cameraHeightMeters,
+    cameraView.cameraLon,
+    cameraView.cameraLat,
+    cameraView.cameraHeadingDeg,
+    cameraView.cameraPitchDeg,
+    cameraView.viewTargetDistanceMeters,
+    massiveVoxelStyle,
+    massiveLodMode,
+    includeGroundCarpet,
+    minElevationFilterMeters,
+    elevationThresholds,
   ]);
 
   // 注册运行时 window.BeidouGridAPI
@@ -601,6 +855,11 @@ export function App() {
       const mgr = sceneRef.current?.layerManager;
       if (!mgr) return;
 
+      const effectiveQueryLevel: GridLevel =
+        activeTab === "futian-voxel-sim"
+          ? futianStats?.activeLevel ?? 7
+          : gridLevel;
+
       try {
         let cell: BeidouVoxelCell;
         if (code) {
@@ -633,7 +892,7 @@ export function App() {
             point.lon,
             point.lat,
             point.height ?? 0,
-            gridLevel,
+            effectiveQueryLevel,
             "query-highlight",
           );
         } else {
@@ -652,7 +911,7 @@ export function App() {
         alert(e instanceof Error ? e.message : "无效坐标或北斗编码");
       }
     },
-    [gridLevel],
+    [activeTab, futianStats?.activeLevel, gridLevel],
   );
 
   const handleSelectFlightPreset = useCallback(
@@ -720,14 +979,18 @@ export function App() {
             ? voxelResult.stats.obstacleVoxelCount +
               voxelResult.stats.bufferVoxelCount +
               voxelResult.stats.strataVoxelCount
-            : 0,
+            : activeTab === "futian-voxel-sim"
+              ? futianStats?.renderedVoxels ?? 0
+              : 0,
         renderedBuildingCount:
           activeTab === "airspace-obstacle"
             ? voxelResult.stats.buildingCount
-            : 0,
+            : activeTab === "futian-voxel-sim"
+              ? futianStats?.featureCount ?? 0
+              : 0,
       });
     },
-    [activeTab, voxelResult.stats],
+    [activeTab, voxelResult.stats, futianStats],
   );
 
   const handleCameraViewChange = useCallback(
@@ -737,8 +1000,8 @@ export function App() {
           Math.abs(view.cameraHeightMeters - prev.cameraHeightMeters) /
           Math.max(0.05, prev.cameraHeightMeters);
 
-        const prevSpanLon = Math.max(1e-7, prev.viewportBounds.maxLon - prev.viewportBounds.minLon);
-        const prevSpanLat = Math.max(1e-7, prev.viewportBounds.maxLat - prev.viewportBounds.minLat);
+        const prevSpanLon = Math.max(1e-10, prev.viewportBounds.maxLon - prev.viewportBounds.minLon);
+        const prevSpanLat = Math.max(1e-10, prev.viewportBounds.maxLat - prev.viewportBounds.minLat);
         const boundsShiftLon =
           Math.max(
             Math.abs(view.viewportBounds.minLon - prev.viewportBounds.minLon),
@@ -751,10 +1014,13 @@ export function App() {
           ) / prevSpanLat;
 
         if (
+          Boolean(prev.isInteracting) === Boolean(view.isInteracting) &&
           prev.adaptiveLevel === view.adaptiveLevel &&
-          heightDelta < 0.06 &&
-          boundsShiftLon < 0.09 &&
-          boundsShiftLat < 0.09
+          heightDelta < 0.08 &&
+          boundsShiftLon < 0.11 &&
+          boundsShiftLat < 0.11 &&
+          Math.abs(prev.cameraHeadingDeg - view.cameraHeadingDeg) < 4 &&
+          Math.abs(prev.cameraPitchDeg - view.cameraPitchDeg) < 4
         ) {
           return prev;
         }
@@ -770,6 +1036,54 @@ export function App() {
     [adaptiveLevelEnabled],
   );
 
+  const handleSelectMassiveLodMode = useCallback(
+    (mode: MassiveVoxelLodMode) => {
+      setMassiveLodMode(mode);
+    },
+    [],
+  );
+
+  const handleToggleWorkbench = useCallback(() => setWorkbenchOpen((o) => !o), []);
+  const handleOpenApiModal = useCallback(() => setApiModalOpen(true), []);
+  const handleFlyToGlobalStable = useCallback(() => {
+    setAdaptiveLevelEnabled(true);
+    setGridLevel(1);
+    sceneRef.current?.flyToGlobal();
+  }, []);
+  const handleToggleSimulateFlightStable = useCallback(
+    () => setIsSimulatingFlight((s) => !s),
+    [],
+  );
+  const handleClearDynamicPathLayerStable = useCallback(() => {
+    runtimeApi.clearLayer("dynamic-path-api-layer");
+    setApiPathResult(null);
+  }, [runtimeApi]);
+  const handleChangeWhiteModelOpacityStable = useCallback((val: number) => {
+    setWhiteModelOpacity(val);
+    sceneRef.current?.setTilesetOpacity(val, "white-model");
+  }, []);
+  const handleToggleTurbo244ModeStable = useCallback((enabled: boolean) => {
+    setTurbo244Mode(enabled);
+    sceneRef.current?.setTurbo244Mode(enabled);
+  }, []);
+  const handleSelectFutianLandmarkStable = useCallback(
+    (lm: FutianLandmarkPreset) => {
+      setActiveLandmarkId(lm.id);
+      sceneRef.current?.flyToCamera(
+        lm.lon,
+        lm.lat,
+        lm.height,
+        lm.heading,
+        lm.pitch,
+      );
+    },
+    [],
+  );
+  const handleRebuildFutianIndexStable = useCallback(() => {
+    sceneRef.current?.layerManager.invalidateMassiveChunkCache();
+    void startFutianVoxelSimulation(true);
+  }, [startFutianVoxelSimulation]);
+
   const handleToggleAdaptiveLevel = useCallback(
     (enabled: boolean) => {
       setAdaptiveLevelEnabled(enabled);
@@ -780,27 +1094,240 @@ export function App() {
     [cameraView.cameraHeightMeters],
   );
 
+  const globalPanelProps = useMemo<GlobalGridPanelProps>(
+    () => ({
+      cameraView,
+      onFlyToGlobal: handleFlyToGlobalStable,
+      gridLevel,
+      onChangeGridLevel: setGridLevel,
+      adaptiveLevelEnabled,
+      onToggleAdaptiveLevel: handleToggleAdaptiveLevel,
+      layerStyle,
+      onChangeLayerStyle: setLayerStyle,
+      showGlobalShell,
+      onToggleGlobalShell: setShowGlobalShell,
+      showLocalGrid,
+      onToggleLocalGrid: setShowLocalGrid,
+      showGridLabels,
+      onToggleGridLabels: setShowGridLabels,
+      turbo244Mode,
+      onToggleTurbo244Mode: handleToggleTurbo244ModeStable,
+      onQueryPointOrCode: handleQueryPointOrCode,
+    }),
+    [
+      cameraView,
+      handleFlyToGlobalStable,
+      gridLevel,
+      adaptiveLevelEnabled,
+      handleToggleAdaptiveLevel,
+      layerStyle,
+      showGlobalShell,
+      showLocalGrid,
+      showGridLabels,
+      turbo244Mode,
+      handleToggleTurbo244ModeStable,
+      handleQueryPointOrCode,
+    ],
+  );
+
+  const futianPanelProps = useMemo<FutianVoxelPanelProps>(
+    () => ({
+      futianStats,
+      isIndexingFutian,
+      futianIndexProgress,
+      massiveVoxelStyle,
+      onChangeMassiveVoxelStyle: setMassiveVoxelStyle,
+      massiveLodMode,
+      onChangeMassiveLodMode: handleSelectMassiveLodMode,
+      includeGroundCarpet,
+      onToggleGroundCarpet: setIncludeGroundCarpet,
+      minElevationFilterMeters,
+      onChangeMinElevationFilter: setMinElevationFilterMeters,
+      elevationThresholds,
+      onChangeElevationThresholds: setElevationThresholds,
+      whiteModelOpacity,
+      onChangeWhiteModelOpacity: handleChangeWhiteModelOpacityStable,
+      turbo244Mode,
+      onToggleTurbo244Mode: handleToggleTurbo244ModeStable,
+      activeLandmarkId,
+      onSelectFutianLandmark: handleSelectFutianLandmarkStable,
+      onRebuildFutianIndex: handleRebuildFutianIndexStable,
+    }),
+    [
+      futianStats,
+      isIndexingFutian,
+      futianIndexProgress,
+      massiveVoxelStyle,
+      massiveLodMode,
+      handleSelectMassiveLodMode,
+      includeGroundCarpet,
+      minElevationFilterMeters,
+      elevationThresholds,
+      whiteModelOpacity,
+      handleChangeWhiteModelOpacityStable,
+      turbo244Mode,
+      handleToggleTurbo244ModeStable,
+      activeLandmarkId,
+      handleSelectFutianLandmarkStable,
+      handleRebuildFutianIndexStable,
+    ],
+  );
+
+  const obstaclePanelProps = useMemo<ObstacleAvoidancePanelProps>(
+    () => ({
+      hasIonToken: Boolean(CESIUM_ION_TOKEN),
+      customTilesetUrl,
+      onChangeCustomTilesetUrl: setCustomTilesetUrl,
+      onLoadOsmBuildings: handleLoadOsmBuildings,
+      onLoadFutianDemoForAvoidance: handleLoadFutianDemoForAvoidance,
+      onLoadCustomTileset: handleLoadCustomTileset,
+      buildingGridEnabled,
+      onToggleBuildingGrid: setBuildingGridEnabled,
+      bufferGridEnabled,
+      onToggleBufferGrid: setBufferGridEnabled,
+      strataGridEnabled,
+      onToggleStrataGrid: setStrataGridEnabled,
+      buildingLevel,
+      onChangeBuildingLevel: setBuildingLevel,
+      verticalStepMeters,
+      onChangeVerticalStepMeters: setVerticalStepMeters,
+      horizontalBufferMeters,
+      onChangeHorizontalBufferMeters: setHorizontalBufferMeters,
+      verticalBufferMeters,
+      onChangeVerticalBufferMeters: setVerticalBufferMeters,
+      maxAirspaceHeight,
+      onChangeMaxAirspaceHeight: setMaxAirspaceHeight,
+      onReextractBuildings: handleGenerateBuildingsAtCamera,
+      isExtractingBuildings,
+      voxelStats: voxelResult.stats,
+      selectedFlightPresetId,
+      onSelectFlightPreset: handleSelectFlightPreset,
+      waypoints,
+      onUpdateWaypoints: setWaypoints,
+      corridorRadiusMeters,
+      onChangeCorridorRadiusMeters: setCorridorRadiusMeters,
+      showDetourRoute,
+      onToggleShowDetourRoute: setShowDetourRoute,
+      flightAnalysis,
+      isPickingWaypoint,
+      onTogglePickWaypoint: setIsPickingWaypoint,
+      pickWaypointHeight,
+      onChangePickWaypointHeight: setPickWaypointHeight,
+      isSimulatingFlight,
+      onToggleSimulateFlight: handleToggleSimulateFlightStable,
+      liveFlightCell,
+    }),
+    [
+      customTilesetUrl,
+      handleLoadOsmBuildings,
+      handleLoadFutianDemoForAvoidance,
+      handleLoadCustomTileset,
+      buildingGridEnabled,
+      bufferGridEnabled,
+      strataGridEnabled,
+      buildingLevel,
+      verticalStepMeters,
+      horizontalBufferMeters,
+      verticalBufferMeters,
+      maxAirspaceHeight,
+      handleGenerateBuildingsAtCamera,
+      isExtractingBuildings,
+      voxelResult.stats,
+      selectedFlightPresetId,
+      handleSelectFlightPreset,
+      waypoints,
+      corridorRadiusMeters,
+      showDetourRoute,
+      flightAnalysis,
+      isPickingWaypoint,
+      pickWaypointHeight,
+      isSimulatingFlight,
+      handleToggleSimulateFlightStable,
+      liveFlightCell,
+    ],
+  );
+
+  const apiPanelProps = useMemo<DynamicApiPanelProps>(
+    () => ({
+      apiLevels,
+      onChangeApiLevels: setApiLevels,
+      apiLayerStyle,
+      onChangeApiLayerStyle: setApiLayerStyle,
+      apiPathResult,
+      onRunDynamicPathGeneration: handleRunDynamicPath,
+      onClearDynamicPathLayer: handleClearDynamicPathLayerStable,
+      onQueryPointOrCode: handleQueryPointOrCode,
+      onOpenApiModal: handleOpenApiModal,
+    }),
+    [
+      apiLevels,
+      apiLayerStyle,
+      apiPathResult,
+      handleRunDynamicPath,
+      handleClearDynamicPathLayerStable,
+      handleQueryPointOrCode,
+      handleOpenApiModal,
+    ],
+  );
+
+  const handleSceneReadyStable = useCallback(
+    (handle: CesiumSceneHandle) => {
+      sceneRef.current = handle;
+      handle.setTurbo244Mode(turbo244Mode);
+      setSceneReady(true);
+    },
+    [turbo244Mode],
+  );
+
+  const handlePickVoxelCellStable = useCallback(
+    (cell: BeidouVoxelCell, clickedH?: number) => {
+      if (clickedH !== undefined && cell.id.startsWith("col#")) {
+        const clampedH = Math.max(0, Math.min(cell.maxHeight - 0.01, clickedH));
+        const refined = buildVoxelCell(
+          cell.centerLon,
+          cell.centerLat,
+          clampedH,
+          cell.level,
+          cell.category,
+          cell.verticalStepMeters,
+        );
+        setInspectedCell(refined);
+        return;
+      }
+      setInspectedCell(cell);
+    },
+    [],
+  );
+
+  const handlePickCoordinateStable = useCallback(
+    (pt: Required<Wgs84Point>) => {
+      handleQueryPointOrCode(pt, undefined, false);
+    },
+    [handleQueryPointOrCode],
+  );
+
   return (
     <div className="app-root">
       <CesiumViewport
-        activeGridLevel={gridLevel}
+        activeGridLevel={
+          activeTab === "futian-voxel-sim"
+            ? (futianStats?.activeLevel ?? 7)
+            : gridLevel
+        }
         isPickingWaypoint={isPickingWaypoint}
-        onSceneReady={(handle) => {
-          sceneRef.current = handle;
-          setSceneReady(true);
-        }}
+        onSceneReady={handleSceneReadyStable}
         onTelemetry={handleTelemetry}
         onCameraViewChange={handleCameraViewChange}
-        onPickVoxelCell={(cell) => setInspectedCell(cell)}
-        onPickCoordinate={(pt) => handleQueryPointOrCode(pt, undefined, false)}
+        onPickVoxelCell={handlePickVoxelCellStable}
+        onPickCoordinate={handlePickCoordinateStable}
         onAddWaypoint={handleAddWaypoint}
       />
 
       <TopHudBar
         telemetry={telemetry}
         workbenchOpen={workbenchOpen}
-        onToggleWorkbench={() => setWorkbenchOpen((o) => !o)}
-        onOpenApiModal={() => setApiModalOpen(true)}
+        onToggleWorkbench={handleToggleWorkbench}
+        onOpenApiModal={handleOpenApiModal}
       />
 
       {!workbenchOpen && (
@@ -817,76 +1344,10 @@ export function App() {
         activeTab={activeTab}
         onChangeTab={handleChangeTab}
         collapsed={!workbenchOpen}
-        cameraView={cameraView}
-        onFlyToGlobal={() => {
-          setAdaptiveLevelEnabled(true);
-          setGridLevel(1);
-          sceneRef.current?.flyToGlobal();
-        }}
-        gridLevel={gridLevel}
-        onChangeGridLevel={setGridLevel}
-        adaptiveLevelEnabled={adaptiveLevelEnabled}
-        onToggleAdaptiveLevel={handleToggleAdaptiveLevel}
-        layerStyle={layerStyle}
-        onChangeLayerStyle={setLayerStyle}
-        showGlobalShell={showGlobalShell}
-        onToggleGlobalShell={setShowGlobalShell}
-        showLocalGrid={showLocalGrid}
-        onToggleLocalGrid={setShowLocalGrid}
-        showGridLabels={showGridLabels}
-        onToggleGridLabels={setShowGridLabels}
-        onQueryPointOrCode={handleQueryPointOrCode}
-        hasIonToken={Boolean(CESIUM_ION_TOKEN)}
-        customTilesetUrl={customTilesetUrl}
-        onChangeCustomTilesetUrl={setCustomTilesetUrl}
-        onLoadOsmBuildings={handleLoadOsmBuildings}
-        onLoadCustomTileset={handleLoadCustomTileset}
-        buildingGridEnabled={buildingGridEnabled}
-        onToggleBuildingGrid={setBuildingGridEnabled}
-        bufferGridEnabled={bufferGridEnabled}
-        onToggleBufferGrid={setBufferGridEnabled}
-        strataGridEnabled={strataGridEnabled}
-        onToggleStrataGrid={setStrataGridEnabled}
-        buildingLevel={buildingLevel}
-        onChangeBuildingLevel={setBuildingLevel}
-        verticalStepMeters={verticalStepMeters}
-        onChangeVerticalStepMeters={setVerticalStepMeters}
-        horizontalBufferMeters={horizontalBufferMeters}
-        onChangeHorizontalBufferMeters={setHorizontalBufferMeters}
-        verticalBufferMeters={verticalBufferMeters}
-        onChangeVerticalBufferMeters={setVerticalBufferMeters}
-        maxAirspaceHeight={maxAirspaceHeight}
-        onChangeMaxAirspaceHeight={setMaxAirspaceHeight}
-        onReextractBuildings={handleGenerateBuildingsAtCamera}
-        isExtractingBuildings={isExtractingBuildings}
-        voxelStats={voxelResult.stats}
-        selectedFlightPresetId={selectedFlightPresetId}
-        onSelectFlightPreset={handleSelectFlightPreset}
-        waypoints={waypoints}
-        onUpdateWaypoints={setWaypoints}
-        corridorRadiusMeters={corridorRadiusMeters}
-        onChangeCorridorRadiusMeters={setCorridorRadiusMeters}
-        showDetourRoute={showDetourRoute}
-        onToggleShowDetourRoute={setShowDetourRoute}
-        flightAnalysis={flightAnalysis}
-        isPickingWaypoint={isPickingWaypoint}
-        onTogglePickWaypoint={setIsPickingWaypoint}
-        pickWaypointHeight={pickWaypointHeight}
-        onChangePickWaypointHeight={setPickWaypointHeight}
-        isSimulatingFlight={isSimulatingFlight}
-        onToggleSimulateFlight={() => setIsSimulatingFlight((s) => !s)}
-        liveFlightCell={liveFlightCell}
-        apiLevels={apiLevels}
-        onChangeApiLevels={setApiLevels}
-        apiLayerStyle={apiLayerStyle}
-        onChangeApiLayerStyle={setApiLayerStyle}
-        apiPathResult={apiPathResult}
-        onRunDynamicPathGeneration={handleRunDynamicPath}
-        onClearDynamicPathLayer={() => {
-          runtimeApi.clearLayer("dynamic-path-api-layer");
-          setApiPathResult(null);
-        }}
-        onOpenApiModal={() => setApiModalOpen(true)}
+        globalPanel={globalPanelProps}
+        futianPanel={futianPanelProps}
+        obstaclePanel={obstaclePanelProps}
+        apiPanel={apiPanelProps}
       />
 
       <GridInspectorCard
@@ -898,36 +1359,38 @@ export function App() {
         onSelectNeighborCode={(code) => handleQueryPointOrCode(undefined, code)}
       />
 
-      <div className="legend-bar glass-panel">
-        <div className="legend-item">
-          <span
-            className="legend-swatch"
-            style={{ background: "rgba(220, 38, 38, 0.72)" }}
-          />
-          <span>建筑网格化禁飞体元</span>
+      {activeTab === "airspace-obstacle" && (
+        <div className="legend-bar glass-panel">
+          <div className="legend-item">
+            <span
+              className="legend-swatch"
+              style={{ background: "rgba(220, 38, 38, 0.72)" }}
+            />
+            <span>建筑网格化禁飞体元</span>
+          </div>
+          <div className="legend-item">
+            <span
+              className="legend-swatch"
+              style={{ background: "rgba(245, 158, 11, 0.55)" }}
+            />
+            <span>避障安全缓冲区</span>
+          </div>
+          <div className="legend-item">
+            <span
+              className="legend-swatch"
+              style={{ background: "rgba(6, 182, 212, 0.65)" }}
+            />
+            <span>路径/空域走廊</span>
+          </div>
+          <div className="legend-item">
+            <span
+              className="legend-swatch"
+              style={{ background: "rgba(16, 185, 129, 0.72)" }}
+            />
+            <span>A* 避障推荐绕飞</span>
+          </div>
         </div>
-        <div className="legend-item">
-          <span
-            className="legend-swatch"
-            style={{ background: "rgba(245, 158, 11, 0.55)" }}
-          />
-          <span>避障安全缓冲区</span>
-        </div>
-        <div className="legend-item">
-          <span
-            className="legend-swatch"
-            style={{ background: "rgba(6, 182, 212, 0.65)" }}
-          />
-          <span>路径/空域走廊</span>
-        </div>
-        <div className="legend-item">
-          <span
-            className="legend-swatch"
-            style={{ background: "rgba(16, 185, 129, 0.72)" }}
-          />
-          <span>A* 避障推荐绕飞</span>
-        </div>
-      </div>
+      )}
 
       <ApiPlaygroundDrawer
         open={apiModalOpen}

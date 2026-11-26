@@ -14,7 +14,7 @@
 
 ### 1.2 空域网格化建模与建筑避障（与 1.1 独立模块）
 - **低空高度域分层建模**：支持按国标高度步长（L6 `61.84m` / L7 `7.73m`）或低空精细航层步长（`15m` / `30m`）构建三维立体网格。
-- **多源建筑加载与轮廓提取**：支持在当前相机视区一键生成三维测试建筑群、加载 Cesium 内置 OSM Buildings（需 Ion Token），或输入自定义 3D Tileset URL 通过纯 TypeScript 解析器 [TilesetBuildingExtractor.ts](src/core/TilesetBuildingExtractor.ts) 实时提取建筑 `.glb`/`.b3dm` 轮廓与高程。
+- **多源建筑加载与轮廓提取**：支持加载本地复制的 **福田中心区 3D Tiles 建筑白膜（`public/futian-3dtiles/tileset.json`，15 个 `.glb` 分块，35,400+ 栋/图元建筑）**、在当前相机视区一键生成三维测试建筑群、加载 Cesium 内置 OSM Buildings（需 Ion Token），或输入自定义 3D Tileset URL 通过纯 TypeScript 解析器 [TilesetBuildingExtractor.ts](src/core/TilesetBuildingExtractor.ts) 实时提取建筑 `.glb`/`.b3dm` 轮廓与高程。
 - **周边避障缓冲区与飞行冲突分析**：自动将建筑物体素化为红色半透明白边禁飞体元，并按设定水平/垂直安全距离生成橙色避障缓冲区；支持预置航线及地图交互选点规划，实时检测冲突体元并基于三维北斗体元 A* 算法自动求解绿色无冲突绕飞航线与 UAV 实时轨迹追踪。
 
 ### 1.3 动态经纬度、路径网格生成与可调用 API
@@ -30,6 +30,13 @@
   - `POST /api/beidou/encode`
   - `GET /api/beidou/decode?code=...`
   - `POST /api/beidou/path-grids`
+
+### 1.4 北斗亿级体素与 3D Tiles 城市仿真（福田白膜示范区 · 最高 L10 厘米级）
+- **独立示范城市白膜资产**：从深圳城市白膜筛选出福田区核心 15 块高精度 `.glb` 模型及独立 `tileset.json` 置于 `public/futian-3dtiles/`（共 26.25 MB、最大单栋可达 351 m），开箱即用无需额外外部服务。
+- **流式稀疏体素栅格化引擎（[MassiveVoxelEngine.ts](src/core/MassiveVoxelEngine.ts)）**：4 并发异步解析 GLB 建筑三角面并栅格化至 GB/T 39409-2020 L7（`7.73m`）网格柱高表，聚合为 `16×16` 空间宏块，实时统计 **亿级 L8（亚米）至万亿级 L10（1.5cm）** 虚拟体元寻址容量。
+- **全尺度 L6–L10 视口共形表面流式渲染**：支持随相机净高自适应或手动锁定 **L6 (`61.8m`) / L7 (`7.73m`) / L8 (`0.97m`) / L9 (`12.1cm`) / L10 (`1.5cm` · 20位2D/32位3D满精度码)**；近景对建筑焦域实施局部精细体素加密并保留 L7 周边天际线。
+- **高性能 WebGL 与 React 管线优化**：采用 WGS84 解析曲率 ENU 变换消除逐体元重复大地测量计算、开启封闭体元背面剔除与 2,400/5,200 扩批 Primitive、将连续地表网改为纯 GPU `PolylineCollection` 线框、使用 `requestAnimationFrame` + `React.memo` 节流防抖，显著消除拖动卡顿。
+- **多种体素视觉模式与福田地标联动**：支持**共形白膜线框**、**高程梯度体元**、**半透明全实体**、**仅福田白膜**四种切换，并支持最小高程过滤、地表铺底开关、白膜不透明度调节及福田核心地标一键飞入。
 
 ---
 
@@ -91,6 +98,8 @@ npm test
 
 ```text
 ├── .env.example                          # 环境变量配置模板
+├── public/
+│   └── futian-3dtiles/                   # 福田区建筑白膜 3D Tiles 示范资产 (tileset.json + 15x NoLod_*.glb)
 ├── vite.config.ts                        # Vite 插件、可选本地 GIS 服务与北斗 REST API 中间件
 ├── src/
 │   ├── api/
@@ -100,17 +109,18 @@ npm test
 │   │   ├── BeidouGridCode.ts             # GB/T 39409-2020 2D/3D 编解码核心引擎
 │   │   ├── BeidouGridEngine.ts           # 路径网格生成、范围枚举与 3D A* 避障规划
 │   │   ├── AirspaceVoxelizer.ts          # 建筑体素化、缓冲区扩展与低空分层
+│   │   ├── MassiveVoxelEngine.ts         # 3D Tiles 三角面稀疏栅格化与亿级视口共形体素流式引擎
 │   │   ├── TilesetBuildingExtractor.ts   # 3D Tiles (.glb/.b3dm) 建筑轮廓与高程提取器
-│   │   ├── GridLayerManager.ts           # Cesium 批量图元与全球球壳网格渲染器
+│   │   ├── GridLayerManager.ts           # Cesium 批量图元、共形体素合批与全球球壳渲染器
 │   │   └── SampleCityData.ts             # 城市预设视角、示范建筑与测试航线
 │   ├── components/
 │   │   ├── CesiumViewport.tsx            # Cesium 三维视图与拾取遥测
-│   │   ├── ControlPanel.tsx              # 三模块交互控制工作台
+│   │   ├── ControlPanel.tsx              # 四模块交互控制工作台 (1.1 全球 / 1.2 避障 / 1.3 API / 1.4 亿级体素)
 │   │   ├── TopHudBar.tsx                 # 顶部实时性能与北斗码监控条
 │   │   ├── GridInspectorCard.tsx         # 右侧体元属性与邻接拓扑探针
 │   │   └── ApiPlaygroundDrawer.tsx       # 动态路径/API 交互调试台
 │   ├── types/beidou.ts                   # TypeScript 核心类型定义
-│   └── __tests__/beidouGrid.test.ts      # 核心算法与 GLB 解析单元测试
+│   └── __tests__/beidouGrid.test.ts      # 核心算法、GLB 轮廓提取与亿级体素引擎单元测试
 ```
 
 ---

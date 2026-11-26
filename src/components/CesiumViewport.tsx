@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from 'react';
-import * as Cesium from 'cesium';
+import React, { useEffect, useRef } from "react";
+import * as Cesium from "cesium";
 import type {
   BeidouVoxelCell,
   CameraViewInfo,
@@ -7,21 +7,28 @@ import type {
   TelemetrySnapshot,
   ViewportBounds,
   Wgs84Point,
-} from '../types/beidou';
+} from "../types/beidou";
 import {
   encode2D,
   encode3D,
   recommendLevelFromAltitude,
-} from '../core/BeidouGridCode';
-import { GridLayerManager } from '../core/GridLayerManager';
-import { GLOBAL_CAMERA_VIEW } from '../core/SampleCityData';
-import { CESIUM_ION_TOKEN } from '../api/gisDataConfig';
+} from "../core/BeidouGridCode";
+import { GridLayerManager } from "../core/GridLayerManager";
+import { GLOBAL_CAMERA_VIEW } from "../core/SampleCityData";
+import { CESIUM_ION_TOKEN } from "../api/gisDataConfig";
 
 export interface CesiumSceneHandle {
   viewer: Cesium.Viewer;
   layerManager: GridLayerManager;
   flyToGlobal: () => void;
   flyToUrbanView: (lon: number, lat: number, height?: number) => void;
+  flyToCamera: (
+    lon: number,
+    lat: number,
+    height: number,
+    heading?: number,
+    pitch?: number,
+  ) => void;
   flyToBounds: (bounds: {
     minLon: number;
     maxLon: number;
@@ -30,7 +37,15 @@ export interface CesiumSceneHandle {
     minHeight?: number;
     maxHeight?: number;
   }) => void;
-  loadTilesetUrl: (url?: string) => Promise<boolean>;
+  loadTilesetUrl: (
+    url?: string,
+    options?: { styleMode?: "white-model" | "blueprint"; opacity?: number },
+  ) => Promise<boolean>;
+  setTilesetOpacity: (
+    opacity: number,
+    styleMode?: "white-model" | "blueprint",
+  ) => void;
+  setTurbo244Mode: (enabled: boolean) => void;
   loadCesiumOsmBuildings: () => Promise<boolean>;
   getCameraRoi: (defaultRadiusDeg?: number) => {
     minLon: number;
@@ -50,12 +65,15 @@ interface CesiumViewportProps {
   onSceneReady: (handle: CesiumSceneHandle) => void;
   onTelemetry: (snapshot: TelemetrySnapshot) => void;
   onCameraViewChange: (view: CameraViewInfo) => void;
-  onPickVoxelCell: (cell: BeidouVoxelCell) => void;
+  onPickVoxelCell: (
+    cell: BeidouVoxelCell,
+    clickedHeightMeters?: number,
+  ) => void;
   onPickCoordinate: (point: Required<Wgs84Point>) => void;
   onAddWaypoint: (point: Required<Wgs84Point>) => void;
 }
 
-export const CesiumViewport: React.FC<CesiumViewportProps> = ({
+export const CesiumViewport: React.FC<CesiumViewportProps> = React.memo(({
   activeGridLevel,
   isPickingWaypoint,
   onSceneReady,
@@ -69,6 +87,7 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
   const viewerRef = useRef<Cesium.Viewer | null>(null);
   const layerManagerRef = useRef<GridLayerManager | null>(null);
   const activeTilesetRef = useRef<Cesium.Cesium3DTileset | null>(null);
+  const turbo244ModeRef = useRef<boolean>(false);
   const droneEntityRef = useRef<Cesium.Entity | null>(null);
 
   const propsRef = useRef({
@@ -104,19 +123,27 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       }
     ).createDefaultImageryProviderViewModels;
 
-    const imageryProviderViewModels = createDefaultModels ? createDefaultModels() : undefined;
+    const imageryProviderViewModels = createDefaultModels
+      ? createDefaultModels()
+      : undefined;
     const defaultImageryModel =
       imageryProviderViewModels &&
       (CESIUM_ION_TOKEN
         ? imageryProviderViewModels[0]
-        : (imageryProviderViewModels.find((m) => m.name.includes('ArcGIS World Imagery')) ??
-            imageryProviderViewModels.find((m) => m.name.includes('OpenStreetMap')) ??
-            imageryProviderViewModels[0]));
+        : (imageryProviderViewModels.find((m) =>
+            m.name.includes("ArcGIS World Imagery"),
+          ) ??
+          imageryProviderViewModels.find((m) =>
+            m.name.includes("OpenStreetMap"),
+          ) ??
+          imageryProviderViewModels[0]));
 
     const viewer = new Cesium.Viewer(containerRef.current, {
       baseLayerPicker: true,
       ...(imageryProviderViewModels ? { imageryProviderViewModels } : {}),
-      ...(defaultImageryModel ? { selectedImageryProviderViewModel: defaultImageryModel } : {}),
+      ...(defaultImageryModel
+        ? { selectedImageryProviderViewModel: defaultImageryModel }
+        : {}),
       terrainProviderViewModels: [],
       geocoder: false,
       homeButton: true,
@@ -127,34 +154,48 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       fullscreenButton: false,
       infoBox: false,
       selectionIndicator: false,
+      msaaSamples: 1,
+      orderIndependentTranslucency: false,
       contextOptions: {
         webgl: {
           alpha: false,
-          antialias: true,
-          powerPreference: 'high-performance',
+          antialias: false,
+          powerPreference: "high-performance",
         },
       },
     });
 
     if (viewer.cesiumWidget.creditContainer instanceof HTMLElement) {
-      viewer.cesiumWidget.creditContainer.style.display = 'none';
+      viewer.cesiumWidget.creditContainer.style.display = "none";
     }
 
-    viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#071426');
+    viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#071426");
     viewer.scene.globe.enableLighting = false;
+    // 固定上午 11:00 太阳方位角（UTC+8 03:00Z），使 3D Tiles 建筑白膜具有鲜明受光面与背光面对比
+    viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(
+      "2026-06-21T03:00:00Z",
+    );
     if (viewer.scene.skyAtmosphere) {
       viewer.scene.skyAtmosphere.show = true;
     }
     viewer.scene.globe.depthTestAgainstTerrain = false;
 
-    // 解除近距离缩放到厘米级 (L9-L10) 的 Cesium 默认裁剪与最小缩放限制
-    viewer.camera.percentageChanged = 0.015;
+    // 解除近距离缩放到厘米级 (L9-L10) 的 Cesium 默认裁剪与最小缩放限制，并适度降低连续拖动相机触发频率以保障高帧率
+    viewer.camera.percentageChanged = 0.035;
     if (viewer.camera.frustum instanceof Cesium.PerspectiveFrustum) {
       viewer.camera.frustum.near = 0.02;
     }
     const controller = viewer.scene.screenSpaceCameraController;
     controller.minimumZoomDistance = 0.05;
-    (controller as unknown as { _minimumZoomRate?: number })._minimumZoomRate = 0.25;
+    (controller as unknown as { _minimumZoomRate?: number })._minimumZoomRate =
+      0.25;
+    viewer.scene.sunBloom = false;
+    viewer.scene.postProcessStages.fxaa.enabled = false;
+    viewer.scene.globe.showGroundAtmosphere = false;
+    viewer.scene.globe.tileCacheSize = 400;
+    viewer.scene.globe.maximumScreenSpaceError = turbo244ModeRef.current ? 4.5 : 3.0;
+    if (viewer.scene.sun) viewer.scene.sun.show = false;
+    if (viewer.scene.moon) viewer.scene.moon.show = false;
 
     viewerRef.current = viewer;
     const layerManager = new GridLayerManager(viewer);
@@ -168,7 +209,7 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       height: number | null;
       code2D: string;
       code3D: string;
-    } = { lon: null, lat: null, height: null, code2D: '', code3D: '' };
+    } = { lon: null, lat: null, height: null, code2D: "", code3D: "" };
 
     const computeViewportBounds = (
       centerLon: number,
@@ -184,8 +225,11 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       const camLat = Cesium.Math.toDegrees(camCarto.latitude);
       const cosLat = Math.max(0.25, Math.cos((camLat * Math.PI) / 180));
 
-      // 最大地平线视距按相机高程的 38 倍延伸（在斜角低空视角下覆盖近景脚下至远方天际线）
-      const maxGroundRangeM = Math.max(2.0, Math.min(3_500_000, camHeight * 38));
+      // 最大地平线视距在低空倾斜视角下覆盖清晰城市前景至中远天际线（避免斜望无限拉长到数十公里外）
+      const maxGroundRangeM =
+        camHeight < 2500
+          ? Math.max(2.0, Math.min(18_000, camHeight * 18))
+          : Math.max(2.0, Math.min(3_500_000, camHeight * 38));
       const maxHalfLatDeg = Math.min(55, maxGroundRangeM / 111_000);
       const maxHalfLonDeg = Math.min(75, maxHalfLatDeg / cosLat);
 
@@ -217,14 +261,18 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       };
 
       if (w > 0 && h > 0) {
-        const uList = [0.0, 0.17, 0.34, 0.5, 0.67, 0.84, 1.0];
-        // 由视口底端向顶端天际线采样，确保优先锚定近景并精确捕捉天地交界天际线
-        const vList = [1.0, 0.78, 0.58, 0.38, 0.2, 0.04];
+        const uList = [0.0, 0.33, 0.67, 1.0];
+        // 由视口底端向顶端天际线采样（4x3 高效网格），兼顾视野覆盖与更低射线开销
+        const vList = [1.0, 0.52, 0.04];
         for (const u of uList) {
           let lastGroundV: number | null = null;
           for (const v of vList) {
-            const ray = viewer.camera.getPickRay(new Cesium.Cartesian2(w * u, h * v));
-            const hit = ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
+            const ray = viewer.camera.getPickRay(
+              new Cesium.Cartesian2(w * u, h * v),
+            );
+            const hit = ray
+              ? viewer.scene.globe.pick(ray, viewer.scene)
+              : undefined;
             if (hit) {
               pushHit(hit);
               lastGroundV = v;
@@ -236,8 +284,12 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
               let edgeHit: Cesium.Cartesian3 | undefined;
               for (let step = 0; step < 4; step++) {
                 const midV = (loV + hiV) * 0.5;
-                const midRay = viewer.camera.getPickRay(new Cesium.Cartesian2(w * u, h * midV));
-                const midHit = midRay ? viewer.scene.globe.pick(midRay, viewer.scene) : undefined;
+                const midRay = viewer.camera.getPickRay(
+                  new Cesium.Cartesian2(w * u, h * midV),
+                );
+                const midHit = midRay
+                  ? viewer.scene.globe.pick(midRay, viewer.scene)
+                  : undefined;
                 if (midHit) {
                   edgeHit = midHit;
                   hiV = midV;
@@ -252,7 +304,9 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
         }
       }
 
-      const viewRect = viewer.camera.computeViewRectangle(Cesium.Ellipsoid.WGS84);
+      const viewRect = viewer.camera.computeViewRectangle(
+        Cesium.Ellipsoid.WGS84,
+      );
       if (viewRect) {
         const rw = Cesium.Math.toDegrees(viewRect.west);
         const re = Cesium.Math.toDegrees(viewRect.east);
@@ -297,26 +351,70 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       };
     };
 
-    const computeCameraViewInfo = (): CameraViewInfo => {
+    const computeCameraViewInfo = (isInteracting = false): CameraViewInfo => {
       const canvas = viewer.scene.canvas;
       const centerPx = new Cesium.Cartesian2(
         Math.max(1, canvas.clientWidth) / 2,
         Math.max(1, canvas.clientHeight) / 2,
       );
-      const ray = canvas.clientWidth > 0 ? viewer.camera.getPickRay(centerPx) : undefined;
-      const hit = ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
       const camCarto = viewer.camera.positionCartographic;
-      const targetCarto = hit ? Cesium.Cartographic.fromCartesian(hit) : camCarto;
       const cameraHeightMeters = Math.max(0.05, camCarto.height);
+      const tileset = activeTilesetRef.current;
+      const hasActiveTileset = Boolean(tileset && !tileset.isDestroyed());
+      let hit: Cesium.Cartesian3 | undefined;
+      if (
+        hasActiveTileset &&
+        canvas.clientWidth > 0 &&
+        cameraHeightMeters <= 600 &&
+        viewer.scene.pickPositionSupported
+      ) {
+        hit = viewer.scene.pickPosition(centerPx);
+      }
+      if (!hit && canvas.clientWidth > 0) {
+        const ray = viewer.camera.getPickRay(centerPx);
+        hit = ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
+      }
+      const targetCarto = hit
+        ? Cesium.Cartographic.fromCartesian(hit)
+        : camCarto;
+      if (tileset && !tileset.isDestroyed()) {
+        const baseSse = turbo244ModeRef.current ? 20 : 14;
+        tileset.maximumScreenSpaceError =
+          cameraHeightMeters > 6000
+            ? Math.max(baseSse, 64)
+            : cameraHeightMeters > 2500
+              ? Math.max(baseSse, 32)
+              : baseSse;
+      }
+      const cameraLon = Cesium.Math.toDegrees(camCarto.longitude);
+      const cameraLat = Cesium.Math.toDegrees(camCarto.latitude);
       const centerLon = Cesium.Math.toDegrees(targetCarto.longitude);
       const centerLat = Cesium.Math.toDegrees(targetCarto.latitude);
+      const cameraHeadingDeg = Cesium.Math.toDegrees(viewer.camera.heading);
+      const cameraPitchDeg = Cesium.Math.toDegrees(viewer.camera.pitch);
+      const viewTargetDistanceMeters = hit
+        ? Math.max(
+            0.05,
+            Cesium.Cartesian3.distance(viewer.camera.positionWC, hit),
+          )
+        : cameraHeightMeters;
 
       return {
         cameraHeightMeters,
+        cameraLon,
+        cameraLat,
+        cameraHeadingDeg,
+        cameraPitchDeg,
+        viewTargetDistanceMeters,
         centerLon,
         centerLat,
         adaptiveLevel: recommendLevelFromAltitude(cameraHeightMeters),
-        viewportBounds: computeViewportBounds(centerLon, centerLat, cameraHeightMeters),
+        viewportBounds: computeViewportBounds(
+          centerLon,
+          centerLat,
+          cameraHeightMeters,
+        ),
+        isInteracting,
       };
     };
 
@@ -324,7 +422,7 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       frameCounter++;
       const now = performance.now();
       if (now - lastFpsTick >= 500) {
-        const fps = Math.min(120, Math.round((frameCounter * 1000) / (now - lastFpsTick)));
+        const fps = Math.round((frameCounter * 1000) / (now - lastFpsTick));
         frameCounter = 0;
         lastFpsTick = now;
 
@@ -346,17 +444,46 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       }
     });
 
+    let lastWheelMs = 0;
     let lastCameraEmitMs = 0;
     let pendingTimer: number | null = null;
+    let settleTimer: number | null = null;
+    const scheduleSettleEmit = () => {
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        settleTimer = null;
+        if (!viewer.isDestroyed()) {
+          propsRef.current.onCameraViewChange(computeCameraViewInfo(false));
+        }
+      }, 170);
+    };
     const notifyCameraView = (immediate = false) => {
       const now = performance.now();
-      if (immediate || now - lastCameraEmitMs >= 70) {
+      const isWheelBurst = now - lastWheelMs < 180;
+      const throttleMs = isWheelBurst ? 200 : 110;
+      if (immediate) {
+        if (pendingTimer !== null) {
+          window.clearTimeout(pendingTimer);
+          pendingTimer = null;
+        }
+        if (settleTimer !== null) {
+          window.clearTimeout(settleTimer);
+          settleTimer = null;
+        }
+        lastCameraEmitMs = now;
+        propsRef.current.onCameraViewChange(computeCameraViewInfo(false));
+        return;
+      }
+      scheduleSettleEmit();
+      if (!isWheelBurst && now - lastCameraEmitMs >= throttleMs) {
         if (pendingTimer !== null) {
           window.clearTimeout(pendingTimer);
           pendingTimer = null;
         }
         lastCameraEmitMs = now;
-        propsRef.current.onCameraViewChange(computeCameraViewInfo());
+        propsRef.current.onCameraViewChange(computeCameraViewInfo(true));
         return;
       }
       if (pendingTimer === null) {
@@ -364,9 +491,9 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
           pendingTimer = null;
           lastCameraEmitMs = performance.now();
           if (!viewer.isDestroyed()) {
-            propsRef.current.onCameraViewChange(computeCameraViewInfo());
+            propsRef.current.onCameraViewChange(computeCameraViewInfo(true));
           }
-        }, 70);
+        }, throttleMs);
       }
     };
 
@@ -377,58 +504,80 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       notifyCameraView(true);
     });
 
-    // 低空 < 40m 时启用连续对数滚轮缩放，绕过 Cesium 内核 1m 碰撞阻尼，平滑放大至厘米级 (L9-L10)
+    // 低空或近建筑屋顶 (< 45m 视距) 时启用连续对数滚轮缩放，绕过 Cesium 碰撞阻尼，平滑放大至厘米级 (L9-L10)
     const onWheelCapture = (e: WheelEvent) => {
       if (viewer.isDestroyed() || e.deltaY === 0) return;
+      lastWheelMs = performance.now();
       const camCarto = viewer.camera.positionCartographic;
       const camHeight = camCarto.height;
-      if (camHeight > 40) return;
-      if (camHeight > 30 && e.deltaY > 0) return;
-
-      e.preventDefault();
-      e.stopImmediatePropagation();
+      // 超过最高建筑+净空范围 (600m) 直接放行给 Cesium 原生缩放，彻底消除每次滚轮的 GPU pickPosition 同步阻塞
+      if (camHeight > 600) return;
 
       const canvas = viewer.scene.canvas;
       const rect = canvas.getBoundingClientRect();
-      const pointer = new Cesium.Cartesian2(e.clientX - rect.left, e.clientY - rect.top);
+      const pointer = new Cesium.Cartesian2(
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+      );
       const centerPx = new Cesium.Cartesian2(
         Math.max(1, canvas.clientWidth) / 2,
         Math.max(1, canvas.clientHeight) / 2,
       );
-      const ray = viewer.camera.getPickRay(pointer) ?? viewer.camera.getPickRay(centerPx);
-      const hit = ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
+
+      let hit: Cesium.Cartesian3 | undefined;
+      const hasActiveTileset = Boolean(
+        activeTilesetRef.current && !activeTilesetRef.current.isDestroyed(),
+      );
+      if (hasActiveTileset && viewer.scene.pickPositionSupported) {
+        const pickedPos = viewer.scene.pickPosition(pointer);
+        if (pickedPos) hit = pickedPos;
+      }
+      if (!hit) {
+        const ray =
+          viewer.camera.getPickRay(pointer) ??
+          viewer.camera.getPickRay(centerPx);
+        hit = ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
+      }
+
+      const targetDist = hit
+        ? Cesium.Cartesian3.distance(viewer.camera.position, hit)
+        : camHeight;
+      const effectiveClearance = Math.min(camHeight, targetDist);
+      if (effectiveClearance > 45) return;
+      if (effectiveClearance > 32 && e.deltaY > 0) return;
+
+      e.preventDefault();
+      e.stopImmediatePropagation();
+
       const zoomingIn = e.deltaY < 0;
-      const minHeight = 0.08;
+      const minClearance = 0.08;
 
       if (hit) {
-        const dist = Cesium.Cartesian3.distance(viewer.camera.position, hit);
         const dir = Cesium.Cartesian3.normalize(
-          Cesium.Cartesian3.subtract(hit, viewer.camera.position, new Cesium.Cartesian3()),
+          Cesium.Cartesian3.subtract(
+            hit,
+            viewer.camera.position,
+            new Cesium.Cartesian3(),
+          ),
           new Cesium.Cartesian3(),
         );
         if (zoomingIn) {
-          if (camHeight <= minHeight) return;
-          const rawStep = Math.max(0.015, dist * 0.26);
-          const candidatePos = Cesium.Cartesian3.add(
-            viewer.camera.position,
-            Cesium.Cartesian3.multiplyByScalar(dir, rawStep, new Cesium.Cartesian3()),
-            new Cesium.Cartesian3(),
+          if (targetDist <= minClearance || camHeight <= minClearance) return;
+          const rawStep = Math.max(0.015, targetDist * 0.26);
+          const clampedStep = Math.min(
+            rawStep,
+            Math.max(0, targetDist - minClearance),
           );
-          const candidateCarto = Cesium.Ellipsoid.WGS84.cartesianToCartographic(candidatePos);
-          if (candidateCarto.height >= minHeight) {
-            viewer.camera.position = candidatePos;
-          } else {
-            const dh = camHeight - candidateCarto.height;
-            const ratio = dh > 1e-6 ? Math.max(0, (camHeight - minHeight) / dh) : 0;
-            viewer.camera.move(dir, rawStep * ratio);
-          }
+          viewer.camera.move(dir, clampedStep);
         } else {
-          const backStep = Math.max(0.025, dist * 0.34);
+          const backStep = Math.max(0.025, targetDist * 0.34);
           viewer.camera.move(dir, -backStep);
         }
       } else {
-        if (zoomingIn && camHeight > minHeight) {
-          viewer.camera.zoomIn(Math.max(0.015, (camHeight - minHeight) * 0.26));
+        if (zoomingIn && camHeight > minClearance) {
+          viewer.camera.zoomIn(
+            Math.max(0.015, (camHeight - minClearance) * 0.26),
+          );
         } else if (!zoomingIn) {
           viewer.camera.zoomOut(Math.max(0.025, camHeight * 0.34));
         }
@@ -436,84 +585,116 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
 
       notifyCameraView(false);
     };
-    viewer.scene.canvas.addEventListener('wheel', onWheelCapture, {
+    viewer.scene.canvas.addEventListener("wheel", onWheelCapture, {
       passive: false,
       capture: true,
     });
 
     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    let lastMousePickMs = 0;
 
-    handler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
-      const ray = viewer.camera.getPickRay(movement.endPosition);
-      if (!ray) return;
-      const cartesian = viewer.scene.globe.pick(ray, viewer.scene);
-      if (!cartesian) {
-        latestMouse = { lon: null, lat: null, height: null, code2D: '', code3D: '' };
-        return;
-      }
-      const carto = Cesium.Cartographic.fromCartesian(cartesian);
-      const lon = Cesium.Math.toDegrees(carto.longitude);
-      const lat = Cesium.Math.toDegrees(carto.latitude);
-      const h = Math.max(0, carto.height || 0);
-      const lv = propsRef.current.activeGridLevel;
-      try {
-        latestMouse = {
-          lon,
-          lat,
-          height: h,
-          code2D: encode2D(lat, lon, lv),
-          code3D: encode3D(lat, lon, h, lv),
-        };
-      } catch {
-        // out of range
-      }
-    }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+    handler.setInputAction(
+      (movement: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
+        const now = performance.now();
+        if (now - lastMousePickMs < 24) return;
+        lastMousePickMs = now;
 
-    handler.setInputAction((click: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
-      if (propsRef.current.isPickingWaypoint) {
-        const ray = viewer.camera.getPickRay(click.position);
-        const cartesian = ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
+        const ray = viewer.camera.getPickRay(movement.endPosition);
+        if (!ray) return;
+        const cartesian = viewer.scene.globe.pick(ray, viewer.scene);
+        if (!cartesian) {
+          latestMouse = {
+            lon: null,
+            lat: null,
+            height: null,
+            code2D: "",
+            code3D: "",
+          };
+          return;
+        }
+        const carto = Cesium.Cartographic.fromCartesian(cartesian);
+        const lon = Cesium.Math.toDegrees(carto.longitude);
+        const lat = Cesium.Math.toDegrees(carto.latitude);
+        const h = Math.max(0, carto.height || 0);
+        const lv = propsRef.current.activeGridLevel;
+        try {
+          latestMouse = {
+            lon,
+            lat,
+            height: h,
+            code2D: encode2D(lat, lon, lv),
+            code3D: encode3D(lat, lon, h, lv),
+          };
+        } catch {
+          // out of range
+        }
+      },
+      Cesium.ScreenSpaceEventType.MOUSE_MOVE,
+    );
+
+    handler.setInputAction(
+      (click: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+        if (propsRef.current.isPickingWaypoint) {
+          const ray = viewer.camera.getPickRay(click.position);
+          const cartesian = ray
+            ? viewer.scene.globe.pick(ray, viewer.scene)
+            : undefined;
+          if (cartesian) {
+            const carto = Cesium.Cartographic.fromCartesian(cartesian);
+            propsRef.current.onAddWaypoint({
+              lon: Cesium.Math.toDegrees(carto.longitude),
+              lat: Cesium.Math.toDegrees(carto.latitude),
+              height: 0,
+              timestamp: Date.now(),
+            });
+          }
+          return;
+        }
+
+        const picked = viewer.scene.pick(click.position);
+        if (
+          picked &&
+          picked.id &&
+          typeof picked.id === "object" &&
+          "code3D" in picked.id
+        ) {
+          let clickedH: number | undefined;
+          if (viewer.scene.pickPositionSupported) {
+            const pickedPos = viewer.scene.pickPosition(click.position);
+            if (pickedPos) {
+              const c = Cesium.Cartographic.fromCartesian(pickedPos);
+              clickedH = Math.max(0, c.height || 0);
+            }
+          }
+          propsRef.current.onPickVoxelCell(
+            picked.id as BeidouVoxelCell,
+            clickedH,
+          );
+          return;
+        }
+
+        const pickedPosition = viewer.scene.pickPositionSupported
+          ? viewer.scene.pickPosition(click.position)
+          : undefined;
+        const cartesian =
+          pickedPosition ??
+          (() => {
+            const ray = viewer.camera.getPickRay(click.position);
+            return ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
+          })();
+
         if (cartesian) {
           const carto = Cesium.Cartographic.fromCartesian(cartesian);
-          propsRef.current.onAddWaypoint({
+          propsRef.current.onPickCoordinate({
             lon: Cesium.Math.toDegrees(carto.longitude),
             lat: Cesium.Math.toDegrees(carto.latitude),
-            height: 0,
+            height: Math.max(0, carto.height || 0),
             timestamp: Date.now(),
           });
         }
-        return;
-      }
-
-      const picked = viewer.scene.pick(click.position);
-      if (
-        picked &&
-        picked.id &&
-        typeof picked.id === 'object' &&
-        'code3D' in picked.id
-      ) {
-        propsRef.current.onPickVoxelCell(picked.id as BeidouVoxelCell);
-        return;
-      }
-
-      const cartesian =
-        viewer.scene.pickPositionSupported && viewer.scene.pickPosition(click.position)
-          ? viewer.scene.pickPosition(click.position)
-          : (() => {
-              const ray = viewer.camera.getPickRay(click.position);
-              return ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined;
-            })();
-
-      if (cartesian) {
-        const carto = Cesium.Cartographic.fromCartesian(cartesian);
-        propsRef.current.onPickCoordinate({
-          lon: Cesium.Math.toDegrees(carto.longitude),
-          lat: Cesium.Math.toDegrees(carto.latitude),
-          height: Math.max(0, carto.height || 0),
-          timestamp: Date.now(),
-        });
-      }
-    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+      },
+      Cesium.ScreenSpaceEventType.LEFT_CLICK,
+    );
 
     const clearActiveTileset = () => {
       if (activeTilesetRef.current) {
@@ -558,16 +739,40 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
         });
       },
 
+      flyToCamera(lon, lat, height, heading = 12, pitch = -30) {
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromDegrees(lon, lat, height),
+          orientation: {
+            heading: Cesium.Math.toRadians(heading),
+            pitch: Cesium.Math.toRadians(pitch),
+            roll: 0,
+          },
+          duration: 1.15,
+        });
+      },
+
       flyToBounds(bounds) {
-        const span = Math.max(bounds.maxLon - bounds.minLon, bounds.maxLat - bounds.minLat);
-        const padLon = Math.max(0.000002, (bounds.maxLon - bounds.minLon) * 1.1);
-        const padLat = Math.max(0.000002, (bounds.maxLat - bounds.minLat) * 1.1);
+        const span = Math.max(
+          bounds.maxLon - bounds.minLon,
+          bounds.maxLat - bounds.minLat,
+        );
+        const padLon = Math.max(
+          0.000002,
+          (bounds.maxLon - bounds.minLon) * 1.1,
+        );
+        const padLat = Math.max(
+          0.000002,
+          (bounds.maxLat - bounds.minLat) * 1.1,
+        );
         const cLon = (bounds.minLon + bounds.maxLon) * 0.5;
         const cLat = (bounds.minLat + bounds.maxLat) * 0.5;
 
         if (span < 0.02) {
           const spanMeters = Math.max(0.15, span * 111_000);
-          const alt = Math.max(0.45, Math.min(400, (bounds.maxHeight ?? 0) + spanMeters * 3.2));
+          const alt = Math.max(
+            0.45,
+            Math.min(400, (bounds.maxHeight ?? 0) + spanMeters * 3.2),
+          );
           viewer.camera.flyTo({
             destination: Cesium.Cartesian3.fromDegrees(cLon, cLat, alt),
             orientation: {
@@ -590,25 +795,69 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
         }
       },
 
-      async loadTilesetUrl(url) {
+      async loadTilesetUrl(url, options) {
         clearActiveTileset();
         if (!url || !url.trim()) return false;
 
+        const styleMode = options?.styleMode ?? "blueprint";
+        const opacity = options?.opacity ?? 1.0;
+
         try {
           const tileset = await Cesium.Cesium3DTileset.fromUrl(url.trim(), {
-            maximumScreenSpaceError: 8,
+            maximumScreenSpaceError: turbo244ModeRef.current ? 20 : 14,
             dynamicScreenSpaceError: true,
             skipLevelOfDetail: true,
+            cullWithChildrenBounds: true,
+            cullRequestsWhileMoving: true,
+            cullRequestsWhileMovingMultiplier: 12,
+            foveatedScreenSpaceError: true,
+            cacheBytes: 512 * 1024 * 1024,
+            maximumCacheOverflowBytes: 256 * 1024 * 1024,
           });
-          tileset.style = new Cesium.Cesium3DTileStyle({
-            color: "color('#1e3a5f', 1.0)",
-          });
+          tileset.backFaceCulling = opacity >= 0.85;
+          if (styleMode === "white-model") {
+            tileset.style = new Cesium.Cesium3DTileStyle({
+              color: `color('#e8eef5', ${Math.max(0.1, Math.min(1, opacity)).toFixed(2)})`,
+            });
+          } else {
+            tileset.style = new Cesium.Cesium3DTileStyle({
+              color: `color('#1e3a5f', ${Math.max(0.1, Math.min(1, opacity)).toFixed(2)})`,
+            });
+          }
           viewer.scene.primitives.add(tileset);
           activeTilesetRef.current = tileset;
           return true;
         } catch (err) {
-          console.warn('3D Tileset load failed:', err);
+          console.warn("3D Tileset load failed:", err);
           return false;
+        }
+      },
+
+      setTilesetOpacity(opacity, styleMode = "white-model") {
+        const tileset = activeTilesetRef.current;
+        if (!tileset || tileset.isDestroyed()) return;
+        tileset.backFaceCulling = opacity >= 0.85;
+        const hex = styleMode === "white-model" ? "#e8eef5" : "#1e3a5f";
+        tileset.style = new Cesium.Cesium3DTileStyle({
+          color: `color('${hex}', ${Math.max(0.05, Math.min(1, opacity)).toFixed(2)})`,
+        });
+      },
+
+      setTurbo244Mode(enabled) {
+        turbo244ModeRef.current = enabled;
+        if (viewer.isDestroyed()) return;
+        viewer.resolutionScale = enabled ? 0.85 : 1.0;
+        viewer.scene.fog.enabled = !enabled;
+        if (viewer.scene.skyAtmosphere) {
+          viewer.scene.skyAtmosphere.show = !enabled;
+        }
+        viewer.scene.globe.maximumScreenSpaceError = enabled ? 4.5 : 3.0;
+        const tileset = activeTilesetRef.current;
+        if (tileset && !tileset.isDestroyed()) {
+          const h = viewer.camera.positionCartographic.height;
+          const baseSse = enabled ? 20 : 14;
+          tileset.maximumScreenSpaceError =
+            h > 6000 ? Math.max(baseSse, 64) : h > 2500 ? Math.max(baseSse, 32) : baseSse;
         }
       },
 
@@ -621,7 +870,7 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
           activeTilesetRef.current = tileset;
           return true;
         } catch (err) {
-          console.warn('Cesium OSM Buildings load failed:', err);
+          console.warn("Cesium OSM Buildings load failed:", err);
           return false;
         }
       },
@@ -630,7 +879,10 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
         const info = computeCameraViewInfo();
         const radiusDeg = Math.min(
           15,
-          Math.max(defaultRadiusDeg, Math.min(0.08, info.cameraHeightMeters / 180_000)),
+          Math.max(
+            defaultRadiusDeg,
+            Math.min(0.08, info.cameraHeightMeters / 180_000),
+          ),
         );
 
         return {
@@ -653,20 +905,24 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
           return;
         }
 
-        const pos = Cesium.Cartesian3.fromDegrees(point.lon, point.lat, point.height);
+        const pos = Cesium.Cartesian3.fromDegrees(
+          point.lon,
+          point.lat,
+          point.height,
+        );
         if (!droneEntityRef.current) {
           droneEntityRef.current = viewer.entities.add({
             position: pos,
             point: {
               pixelSize: 13,
-              color: Cesium.Color.fromCssColorString('#34d399'),
+              color: Cesium.Color.fromCssColorString("#34d399"),
               outlineColor: Cesium.Color.WHITE,
               outlineWidth: 3,
             },
             label: {
-              text: 'UAV 实时巡航节点',
-              font: 'bold 12px sans-serif',
-              fillColor: Cesium.Color.fromCssColorString('#6ee7b7'),
+              text: "UAV 实时巡航节点",
+              font: "bold 12px sans-serif",
+              fillColor: Cesium.Color.fromCssColorString("#6ee7b7"),
               outlineColor: Cesium.Color.BLACK,
               outlineWidth: 2,
               style: Cesium.LabelStyle.FILL_AND_OUTLINE,
@@ -675,17 +931,20 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
             },
           });
         } else {
-          droneEntityRef.current.position = new Cesium.ConstantPositionProperty(pos);
+          droneEntityRef.current.position = new Cesium.ConstantPositionProperty(
+            pos,
+          );
         }
       },
     };
 
-    const removeHomeOverride = viewer.homeButton.viewModel.command.beforeExecute.addEventListener(
-      (e: { cancel: boolean }) => {
-        e.cancel = true;
-        handle.flyToGlobal();
-      },
-    );
+    const removeHomeOverride =
+      viewer.homeButton.viewModel.command.beforeExecute.addEventListener(
+        (e: { cancel: boolean }) => {
+          e.cancel = true;
+          handle.flyToGlobal();
+        },
+      );
 
     onSceneReady(handle);
 
@@ -693,7 +952,12 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
       if (pendingTimer !== null) {
         window.clearTimeout(pendingTimer);
       }
-      viewer.scene.canvas.removeEventListener('wheel', onWheelCapture, { capture: true });
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      viewer.scene.canvas.removeEventListener("wheel", onWheelCapture, {
+        capture: true,
+      });
       removeHomeOverride();
       removePostRender();
       removeCameraChanged();
@@ -710,4 +974,4 @@ export const CesiumViewport: React.FC<CesiumViewportProps> = ({
   }, []);
 
   return <div ref={containerRef} className="cesium-host" />;
-};
+});

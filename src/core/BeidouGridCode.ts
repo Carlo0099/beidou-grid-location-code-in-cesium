@@ -503,6 +503,45 @@ function computeHeightLevelParts(height: number, level: GridLevel): {
   return { isUnderground, parts };
 }
 
+export interface Beidou2DGeoContext {
+  hemisphere: 'N' | 'S';
+  parts: string[];
+  code2D: string;
+}
+
+/**
+ * 预计算二维编码上下文（用于同一经纬柱体多层高程复用，避免重复经纬度分段运算）
+ */
+export function compute2DGeoContext(
+  lat: number,
+  lon: number,
+  level: GridLevel,
+): Beidou2DGeoContext {
+  assertLevel(level);
+  const { hemisphere, parts } = compute2DLevelParts(lat, lon, level);
+  return {
+    hemisphere,
+    parts,
+    code2D: hemisphere + parts.join(''),
+  };
+}
+
+/**
+ * 使用预计算二维编码上下文快速拼接三维位置码（零额外经纬度角秒拆解开销）
+ */
+export function encode3DWithGeoContext(
+  geo: Beidou2DGeoContext,
+  height: number,
+  level: GridLevel,
+): string {
+  const { isUnderground, parts: hParts } = computeHeightLevelParts(height, level);
+  let code = geo.hemisphere + (isUnderground ? '1' : '0');
+  for (let i = 0; i < level; i++) {
+    code += geo.parts[i] + hParts[i];
+  }
+  return code;
+}
+
 /**
  * 北斗三维网格位置码编码 (GB/T 39409-2020 标准交叉编码, 十级32位)
  */
@@ -800,6 +839,8 @@ export const BeidouGridCode = {
   LEVEL_TO_3D_LENGTH,
   GRID_LEVEL_SPECS,
   getLevelSpec,
+  compute2DGeoContext,
+  encode3DWithGeoContext,
   encode2D,
   decode2D,
   encode3D,

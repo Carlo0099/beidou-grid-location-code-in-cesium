@@ -15,7 +15,40 @@ export type GridCellCategory =
   | 'flight-corridor'
   | 'flight-conflict'
   | 'flight-detour'
-  | 'query-highlight';
+  | 'query-highlight'
+  | 'conformal-ground'
+  | 'conformal-low'
+  | 'conformal-mid'
+  | 'conformal-high'
+  | 'conformal-super';
+
+export type MassiveVoxelStyle =
+  | 'conformal-white'
+  | 'height-heatmap'
+  | 'translucent-volume'
+  | 'tileset-only';
+
+export type MassiveVoxelLodMode = 'auto' | 6 | 7 | 8 | 9 | 10;
+
+export type ElevationColorThresholds = [number, number, number];
+
+export const DEFAULT_ELEVATION_THRESHOLDS: ElevationColorThresholds = [45, 120, 210];
+
+export interface MassiveVoxelStats {
+  tilesTotal: number;
+  tilesParsed: number;
+  featureCount: number;
+  occupiedColumnsL7: number;
+  occupiedVoxelsL7: number;
+  virtualCapacityL7: number;
+  virtualCapacityL8: number;
+  virtualCapacityL10: number;
+  renderedVoxels: number;
+  activeLevel: GridLevel;
+  activeResolutionMeters: number;
+  activeLevelLabel: string;
+  parseTimeMs: number;
+}
 
 export interface GridLevelSpec {
   level: GridLevel;
@@ -76,6 +109,7 @@ export interface BeidouVoxelCell {
   buildingId?: string;
   buildingName?: string;
   distanceToObstacleMeters?: number;
+  verticalStepMeters?: number;
 }
 
 export interface BuildingFootprint {
@@ -162,10 +196,16 @@ export interface ViewportBounds {
 
 export interface CameraViewInfo {
   cameraHeightMeters: number;
+  cameraLon: number;
+  cameraLat: number;
+  cameraHeadingDeg: number;
+  cameraPitchDeg: number;
+  viewTargetDistanceMeters: number;
   centerLon: number;
   centerLat: number;
   adaptiveLevel: GridLevel;
   viewportBounds: ViewportBounds;
+  isInteracting?: boolean;
 }
 
 export interface CityPreset {

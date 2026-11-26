@@ -250,8 +250,8 @@ export function tracePathToBeidouGrids(
     return Array.from(cellMap.values());
   }
 
-  const horizSampleM = Math.max(1.5, Math.min(spec.approxGroundMeters * 0.35, 30));
-  const vertSampleM = Math.max(1.5, Math.min(effectiveVStep * 0.35, 25));
+  const horizSampleM = Math.max(0.01, Math.min(spec.approxGroundMeters * 0.45, 30));
+  const vertSampleM = Math.max(0.01, Math.min(effectiveVStep * 0.45, 25));
 
   for (let i = 0; i < normalized.length - 1; i++) {
     const p0 = normalized[i];

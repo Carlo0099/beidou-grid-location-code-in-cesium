@@ -19,9 +19,14 @@ const CATEGORY_TEXT: Record<BeidouVoxelCell['category'], { label: string; color:
   'flight-conflict': { label: '航线碰撞冲突体元', color: '#ff1e42' },
   'flight-detour': { label: '避障绕飞安全体元', color: '#34d399' },
   'query-highlight': { label: '点/码查询高亮单元', color: '#60a5fa' },
+  'conformal-ground': { label: '共形地面铺底体元', color: '#06b6d4' },
+  'conformal-low': { label: '低层共形包络体元', color: '#38bdf8' },
+  'conformal-mid': { label: '中层共形包络体元', color: '#34d399' },
+  'conformal-high': { label: '高层共形包络体元', color: '#f59e0b' },
+  'conformal-super': { label: '超高层共形包络体元', color: '#f43f5e' },
 };
 
-export const GridInspectorCard: React.FC<GridInspectorCardProps> = ({
+export const GridInspectorCard: React.FC<GridInspectorCardProps> = React.memo(({
   cell,
   onClose,
   onSelectNeighborCode,
@@ -97,11 +102,11 @@ export const GridInspectorCard: React.FC<GridInspectorCardProps> = ({
       </div>
 
       <div className="card-subtitle" style={{ fontFamily: 'Consolas, monospace', fontSize: 10 }}>
-        经度: {cell.minLon.toFixed(6)}° ~ {cell.maxLon.toFixed(6)}°
+        经度: {cell.minLon.toFixed(cell.level >= 8 ? 8 : 6)}° ~ {cell.maxLon.toFixed(cell.level >= 8 ? 8 : 6)}°
         <br />
-        纬度: {cell.minLat.toFixed(6)}° ~ {cell.maxLat.toFixed(6)}°
+        纬度: {cell.minLat.toFixed(cell.level >= 8 ? 8 : 6)}° ~ {cell.maxLat.toFixed(cell.level >= 8 ? 8 : 6)}°
         <br />
-        高度: {cell.minHeight.toFixed(2)} m ~ {cell.maxHeight.toFixed(2)} m
+        高度: {cell.minHeight.toFixed(cell.level >= 9 ? 3 : 2)} m ~ {cell.maxHeight.toFixed(cell.level >= 9 ? 3 : 2)} m
       </div>
 
       {neighbors && (
@@ -202,4 +207,4 @@ export const GridInspectorCard: React.FC<GridInspectorCardProps> = ({
       )}
     </aside>
   );
-};
+});
